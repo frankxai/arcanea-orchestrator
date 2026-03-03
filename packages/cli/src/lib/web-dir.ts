@@ -52,7 +52,9 @@ export async function waitForPortAndOpen(
   while (!signal.aborted && Date.now() - start < timeoutMs) {
     const free = await isPortAvailable(port);
     if (!free) {
-      const browser = spawn("open", [url], { stdio: "ignore" });
+      const cmd =
+        process.platform === "win32" ? "start" : process.platform === "linux" ? "xdg-open" : "open";
+      const browser = spawn(cmd, [url], { stdio: "ignore" });
       browser.on("error", () => {});
       return;
     }
