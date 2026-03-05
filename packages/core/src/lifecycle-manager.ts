@@ -35,7 +35,7 @@ import {
 } from "./types.js";
 import { updateMetadata } from "./metadata.js";
 import { getSessionsDir } from "./paths.js";
-import { getLiveBranch } from "./utils.js";
+
 
 /** Parse a duration string like "10m", "30s", "1h" to milliseconds. */
 function parseDuration(str: string): number {
@@ -232,19 +232,6 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
         ) {
           return session.status;
         }
-      }
-    }
-
-    // 2b. Sync live branch from workspace — agents may check out a different
-    //     branch than the one recorded at spawn time (e.g. adopting a pre-existing
-    //     branch with an open PR). Without this, PR auto-detection searches the
-    //     wrong branch and never finds the PR.
-    if (session.workspacePath) {
-      const liveBranch = await getLiveBranch(session.workspacePath);
-      if (liveBranch && liveBranch !== session.branch) {
-        session.branch = liveBranch;
-        const sessionsDir = getSessionsDir(config.configPath, project.path);
-        updateMetadata(sessionsDir, session.id, { branch: liveBranch });
       }
     }
 
