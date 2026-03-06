@@ -12,7 +12,7 @@ interface ReviewInfo {
   reviewDecision: string | null;
 }
 
-const REVIEW_FIX_PROMPT =
+const DEFAULT_REVIEW_FIX_PROMPT =
   "There are review comments on your PR. Check with `gh pr view --comments` and `gh api` for inline comments. Address each one, push fixes, and reply.";
 
 async function checkPRReviews(
@@ -74,6 +74,11 @@ export function registerReviewCheck(program: Command): void {
         process.exit(1);
       }
 
+      // Source prompt from lifecycle reaction config so review-check and
+      // the lifecycle worker stay aligned.
+      const reviewFixPrompt =
+        config.reactions["changes-requested"]?.message ?? DEFAULT_REVIEW_FIX_PROMPT;
+
       const sm = await getSessionManager(config);
       const sessions = await sm.list(projectId);
 
@@ -129,7 +134,7 @@ export function registerReviewCheck(program: Command): void {
 
         if (!opts.dryRun) {
           try {
-            await sm.send(result.sessionId, REVIEW_FIX_PROMPT);
+            await sm.send(result.sessionId, reviewFixPrompt);
             console.log(chalk.green(`    -> Fix prompt sent`));
           } catch (err) {
             console.error(chalk.red(`    -> Failed to send: ${err}`));

@@ -1154,7 +1154,12 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         }
       }
 
-      throw new Error(`Message to session ${sessionId} could not be confirmed`);
+      // Message was already sent via runtimePlugin.sendMessage above — if we
+      // cannot *confirm* delivery (e.g. agent is slow to show output), treat it
+      // as a soft success rather than throwing.  Throwing here caused the caller
+      // to report failure, which prevented the dispatch-hash from updating and
+      // led to duplicate messages on the next poll cycle.
+      return;
     };
 
     let prepared = await prepareSession();

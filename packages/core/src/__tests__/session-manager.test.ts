@@ -1279,7 +1279,7 @@ describe("send", () => {
     );
   });
 
-  it("throws when delivery cannot be confirmed", async () => {
+  it("resolves when delivery cannot be confirmed (message already sent)", async () => {
     writeMetadata(sessionsDir, "app-1", {
       worktree: "/tmp",
       branch: "main",
@@ -1291,9 +1291,11 @@ describe("send", () => {
     vi.mocked(mockAgent.detectActivity).mockReturnValue("idle");
 
     const sm = createSessionManager({ config, registry: mockRegistry });
-    await expect(sm.send("app-1", "Fix the CI failures")).rejects.toThrow(
-      "could not be confirmed",
-    );
+    // Should resolve without throwing — the message was already sent via
+    // sendMessage, so unconfirmed delivery is treated as a soft success
+    // to avoid duplicate dispatches on the next poll cycle.
+    await expect(sm.send("app-1", "Fix the CI failures")).resolves.toBeUndefined();
+    expect(mockRuntime.sendMessage).toHaveBeenCalled();
   });
 
   it("throws for nonexistent session", async () => {
