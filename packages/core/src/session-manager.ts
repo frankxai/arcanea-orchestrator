@@ -1001,7 +1001,6 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       createdAt: new Date(),
       lastActivityAt: new Date(),
       metadata: {
-        orchestratorSessionReused: "false",
         ...(reusableOpenCodeSessionId ? { opencodeSessionId: reusableOpenCodeSessionId } : {}),
       },
     };
@@ -1253,19 +1252,32 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
       if (!list.includes(id)) list.push(id);
     };
 
+    const pushKilled = (id: string): void => {
+      const skippedIndex = result.skipped.indexOf(id);
+      if (skippedIndex >= 0) {
+        result.skipped.splice(skippedIndex, 1);
+      }
+      pushUnique(result.killed, id);
+    };
+
+    const pushSkipped = (id: string): void => {
+      if (result.killed.includes(id)) return;
+      pushUnique(result.skipped, id);
+    };
+
     for (const session of sessions) {
       try {
         // Never clean up orchestrator sessions — they manage the lifecycle.
         // Check explicit role metadata first, fall back to naming convention
         // for pre-existing sessions spawned before the role field was added.
         if (session.metadata["role"] === "orchestrator" || session.id.endsWith("-orchestrator")) {
-          pushUnique(result.skipped, session.id);
+          pushSkipped(session.id);
           continue;
         }
 
         const project = config.projects[session.projectId];
         if (!project) {
-          pushUnique(result.skipped, session.id);
+          pushSkipped(session.id);
           continue;
         }
 
@@ -1308,9 +1320,9 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
           if (!options?.dryRun) {
             await kill(session.id, { purgeOpenCode: true });
           }
-          pushUnique(result.killed, session.id);
+          pushKilled(session.id);
         } else {
-          pushUnique(result.skipped, session.id);
+          pushSkipped(session.id);
         }
       } catch (err) {
         result.errors.push({
@@ -1331,14 +1343,14 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
         if (!archived) continue;
 
         if (archived["role"] === "orchestrator" || archivedId.endsWith("-orchestrator")) {
-          pushUnique(result.skipped, archivedId);
+          pushSkipped(archivedId);
           continue;
         }
 
         const cleanupAgent = archived["agent"] ?? project.agent ?? config.defaults.agent;
         const mappedOpenCodeSessionId = asValidOpenCodeSessionId(archived["opencodeSessionId"]);
         if (cleanupAgent === "opencode" && archived["opencodeCleanedAt"]) {
-          pushUnique(result.skipped, archivedId);
+          pushSkipped(archivedId);
           continue;
         }
         if (cleanupAgent === "opencode" && mappedOpenCodeSessionId) {
@@ -1354,9 +1366,9 @@ export function createSessionManager(deps: SessionManagerDeps): SessionManager {
               continue;
             }
           }
-          pushUnique(result.killed, archivedId);
+          pushKilled(archivedId);
         } else {
-          pushUnique(result.skipped, archivedId);
+          pushSkipped(archivedId);
         }
       }
     }

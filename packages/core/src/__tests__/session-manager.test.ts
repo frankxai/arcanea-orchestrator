@@ -1755,10 +1755,12 @@ describe("cleanup", () => {
     deleteMetadata(sessionsDir2, "app-1", true);
 
     const sm = createSessionManager({ config: configWithSecondProject, registry: mockRegistry });
-    await sm.cleanup();
+    const result = await sm.cleanup();
 
     const deleteLog = readFileSync(deleteLogPath, "utf-8");
     expect(deleteLog).toContain("session delete ses_archived_project2");
+    expect(result.killed).toContain("app-1");
+    expect(result.skipped).not.toContain("app-1");
   });
 
   it("skips invalid archived OpenCode session ids during cleanup", async () => {
@@ -2677,6 +2679,15 @@ describe("spawnOrchestrator", () => {
         launchCommand: "mock-agent --start",
       }),
     );
+  });
+
+  it("does not persist orchestratorSessionReused metadata on newly created sessions", async () => {
+    const sm = createSessionManager({ config, registry: mockRegistry });
+
+    await sm.spawnOrchestrator({ projectId: "my-app" });
+
+    const meta = readMetadataRaw(sessionsDir, "app-orchestrator");
+    expect(meta?.["orchestratorSessionReused"]).toBeUndefined();
   });
 
   it("uses orchestratorModel when configured", async () => {
