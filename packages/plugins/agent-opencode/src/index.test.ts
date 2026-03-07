@@ -277,6 +277,18 @@ describe("getLaunchCommand", () => {
         systemPromptFile: "/tmp/file-prompt.md",
       }),
     );
+    expect(cmd).toContain("\"$(cat '/tmp/file-prompt.md')\"");
+    expect(cmd).not.toContain("direct prompt");
+  });
+
+  it("generates orchestrator-style systemPromptFile launch", () => {
+    const cmd = agent.getLaunchCommand(
+      makeLaunchConfig({
+        sessionId: "my-orchestrator",
+        permissions: "permissionless",
+        systemPromptFile: "/tmp/orchestrator.md",
+      }),
+    );
     expect(cmd).toContain(
       "opencode run --format json --title 'AO:sess-1' \"$(cat '/tmp/file-prompt.md')\"",
     );

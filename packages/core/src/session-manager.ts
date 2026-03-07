@@ -22,6 +22,7 @@ import {
   NON_RESTORABLE_STATUSES,
   SessionNotFoundError,
   SessionNotRestorableError,
+  SessionNotFoundError,
   WorkspaceMissingError,
   type OpenCodeSessionManager,
   type Session,
