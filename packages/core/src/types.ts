@@ -331,7 +331,7 @@ export interface AgentLaunchConfig {
   projectConfig: ProjectConfig;
   issueId?: string;
   prompt?: string;
-  permissions?: AgentPermissionMode;
+  permissions?: AgentPermissionInput;
   model?: string;
   /**
    * System prompt to pass to the agent for orchestrator context.

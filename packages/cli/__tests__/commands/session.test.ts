@@ -16,6 +16,7 @@ import {
   type Session,
   type CleanupResult,
   type SessionManager,
+  SessionNotFoundError,
   getSessionsDir,
   getProjectBaseDir,
 } from "@composio/ao-core";
@@ -334,7 +335,7 @@ describe("session ls", () => {
 
 describe("session kill", () => {
   it("rejects unknown session (no matching project)", async () => {
-    mockSessionManager.kill.mockRejectedValue(new Error("Session not found: unknown-1"));
+    mockSessionManager.kill.mockRejectedValue(new SessionNotFoundError("unknown-1"));
 
     await expect(
       program.parseAsync(["node", "test", "session", "kill", "unknown-1"]),
