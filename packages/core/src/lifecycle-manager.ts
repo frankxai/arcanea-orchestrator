@@ -180,6 +180,19 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
   let polling = false; // re-entrancy guard
   let allCompleteEmitted = false; // guard against repeated all_complete
 
+  /** Check if idle time exceeds the agent-stuck threshold. */
+  function isIdleBeyondThreshold(session: Session, idleTimestamp: Date): boolean {
+    const stuckReaction =
+      config.projects[session.projectId]?.reactions?.["agent-stuck"] ??
+      config.reactions["agent-stuck"];
+    const thresholdStr = (stuckReaction as Record<string, unknown> | undefined)?.threshold;
+    if (typeof thresholdStr !== "string") return false;
+    const stuckThresholdMs = parseDuration(thresholdStr);
+    if (stuckThresholdMs <= 0) return false;
+    const idleMs = Date.now() - idleTimestamp.getTime();
+    return idleMs > stuckThresholdMs;
+  }
+
   /** Determine current status for a session by polling plugins. */
   async function determineStatus(session: Session): Promise<SessionStatus> {
     const project = config.projects[session.projectId];
@@ -188,6 +201,9 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
     const agentName = session.metadata["agent"] ?? project.agent ?? config.defaults.agent;
     const agent = registry.get<Agent>("agent", agentName);
     const scm = project.scm ? registry.get<SCM>("scm", project.scm.plugin) : null;
+
+    // Track activity state across steps so stuck detection can run after PR checks
+    let detectedIdleTimestamp: Date | null = null;
 
     // 1. Check if runtime is alive
     if (session.runtimeHandle) {
@@ -213,17 +229,9 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
             (activityState.state === "idle" || activityState.state === "blocked") &&
             activityState.timestamp
           ) {
-            const stuckReaction =
-              config.projects[session.projectId]?.reactions?.["agent-stuck"] ??
-              config.reactions["agent-stuck"];
-            const thresholdStr = (stuckReaction as Record<string, unknown> | undefined)?.threshold;
-            if (typeof thresholdStr === "string") {
-              const stuckThresholdMs = parseDuration(thresholdStr);
-              if (stuckThresholdMs > 0) {
-                const idleMs = Date.now() - activityState.timestamp.getTime();
-                if (idleMs > stuckThresholdMs) return "stuck";
-              }
-            }
+            if (isIdleBeyondThreshold(session, activityState.timestamp)) return "stuck";
+            // Store idle timestamp for post-PR-check stuck detection
+            detectedIdleTimestamp = activityState.timestamp;
           }
 
           // active/ready/idle (below threshold)/blocked (below threshold) —
@@ -296,13 +304,28 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
         }
         if (reviewDecision === "pending") return "review_pending";
 
+        // 4b. Post-PR stuck detection: agent has a PR open but is idle beyond
+        // threshold. This catches the case where step 2's stuck check was
+        // bypassed (getActivityState returned null) or the idle timestamp
+        // wasn't available during step 2 but the session has been at pr_open
+        // for a long time. Without this, sessions get stuck at "pr_open" forever.
+        if (detectedIdleTimestamp && isIdleBeyondThreshold(session, detectedIdleTimestamp)) {
+          return "stuck";
+        }
+
         return "pr_open";
       } catch {
         // SCM check failed — keep current status
       }
     }
 
-    // 5. Default: if agent is active, it's working
+    // 5. Post-all stuck detection: if we detected idle in step 2 but had no PR,
+    // still check stuck threshold. This handles agents that finish without creating a PR.
+    if (detectedIdleTimestamp && isIdleBeyondThreshold(session, detectedIdleTimestamp)) {
+      return "stuck";
+    }
+
+    // 6. Default: if agent is active, it's working
     if (
       session.status === "spawning" ||
       session.status === SESSION_STATUS.STUCK ||
