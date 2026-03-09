@@ -56,7 +56,21 @@ export async function runRecovery(options: RecoveryManagerOptions): Promise<Reco
     assessments.push(assessment);
 
     if (dryRun) {
-      report.skipped.push(assessment.sessionId);
+      switch (assessment.action) {
+        case "recover":
+          report.recovered.push(assessment.sessionId);
+          break;
+        case "cleanup":
+          report.cleanedUp.push(assessment.sessionId);
+          break;
+        case "escalate":
+          report.escalated.push(assessment.sessionId);
+          break;
+        case "skip":
+        default:
+          report.skipped.push(assessment.sessionId);
+          break;
+      }
       continue;
     }
 

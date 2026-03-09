@@ -133,15 +133,14 @@ function classifySession(
   agentProcessRunning: boolean,
   metadataStatus: SessionStatus,
 ): RecoveryClassification {
-  if (TERMINAL_STATUSES_SET.has(metadataStatus)) {
-    return "unrecoverable";
-  }
-
   if (runtimeAlive && workspaceExists && agentProcessRunning) {
     return "live";
   }
 
   if (!runtimeAlive && !workspaceExists) {
+    if (TERMINAL_STATUSES_SET.has(metadataStatus)) {
+      return "unrecoverable";
+    }
     return "dead";
   }
 
