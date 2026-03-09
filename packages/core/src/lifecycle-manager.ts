@@ -225,12 +225,18 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
 
           // Stuck detection: if agent is idle/blocked beyond the configured threshold,
           // transition to "stuck" so the agent-stuck reaction can fire.
+          // BUT: if the session already has a PR, fall through to step 4 so
+          // merge-readiness is checked first. Without this, stuck detection
+          // short-circuits before the PR state checks and "mergeable" is
+          // never reached — causing the pipeline to stall.
           if (
             (activityState.state === "idle" || activityState.state === "blocked") &&
             activityState.timestamp
           ) {
-            if (isIdleBeyondThreshold(session, activityState.timestamp)) return "stuck";
-            // Store idle timestamp for post-PR-check stuck detection
+            if (isIdleBeyondThreshold(session, activityState.timestamp) && !session.pr) {
+              return "stuck";
+            }
+            // Store idle timestamp for post-PR-check stuck detection (step 4b)
             detectedIdleTimestamp = activityState.timestamp;
           }
 
@@ -296,11 +302,13 @@ export function createLifecycleManager(deps: LifecycleManagerDeps): LifecycleMan
         // Check reviews
         const reviewDecision = await scm.getReviewDecision(session.pr);
         if (reviewDecision === "changes_requested") return "changes_requested";
-        if (reviewDecision === "approved") {
-          // Check merge readiness
+        if (reviewDecision === "approved" || reviewDecision === "none") {
+          // Check merge readiness — treat "none" (no reviewers required)
+          // the same as "approved" so CI-green PRs reach "mergeable" status
+          // and fire the merge.ready event / approved-and-green reaction.
           const mergeReady = await scm.getMergeability(session.pr);
           if (mergeReady.mergeable) return "mergeable";
-          return "approved";
+          if (reviewDecision === "approved") return "approved";
         }
         if (reviewDecision === "pending") return "review_pending";
 
