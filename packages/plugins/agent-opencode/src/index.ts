@@ -107,7 +107,7 @@ function createOpenCodeAgent(): Agent {
           ),
         ].join(" ");
 
-        const fallbackSessionId = `opencode session list --format json | node -e ${shellEscape("let input='';process.stdin.on('data',c=>input+=c).on('end',()=>{const title=process.argv[1];let rows;try{rows=JSON.parse(input)}catch{process.exit(1)};if(!Array.isArray(rows))process.exit(1);const matches=rows.filter(r=>r&&r.title===title&&typeof r.id==='string').sort((a,b)=>new Date(b.updated||0)-new Date(a.updated||0));if(matches.length===0)process.exit(1);process.stdout.write(matches[0].id);});")} ${shellEscape(`AO:${config.sessionId}`)}`;
+        const fallbackSessionId = `opencode session list --format json | node -e ${shellEscape("let input='';process.stdin.on('data',c=>input+=c).on('end',()=>{const title=process.argv[1];let rows;try{rows=JSON.parse(input)}catch{process.exit(1)};if(!Array.isArray(rows))process.exit(1);const isValidId=id=>/^ses_[A-Za-z0-9_-]+$/.test(id);const matches=rows.filter(r=>r&&r.title===title&&typeof r.id==='string'&&isValidId(r.id)).sort((a,b)=>new Date(b.updated||0)-new Date(a.updated||0));if(matches.length===0)process.exit(1);process.stdout.write(matches[0].id);});")} ${shellEscape(`AO:${config.sessionId}`)}`;
 
         const sessionIdCapture = `"$( { ${runCommand} | ${captureSessionId}; } || ${fallbackSessionId} )"`;
 

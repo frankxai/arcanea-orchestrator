@@ -1020,8 +1020,8 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
           existingOrchestrator.metadata["orchestratorSessionReused"] = "true";
           return existingOrchestrator;
         }
-      }
-      if (existingAlive && orchestratorSessionStrategy !== "reuse") {
+        await plugins.runtime.destroy(existingRuntimeHandle).catch(() => undefined);
+      } else if (existingAlive) {
         await plugins.runtime.destroy(existingRuntimeHandle).catch(() => undefined);
       }
     }

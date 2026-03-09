@@ -365,6 +365,12 @@ describe("getLaunchCommand", () => {
     expect(cmd).toContain("AO:sess-1");
   });
 
+  it("validates session ID format in fallback script", () => {
+    const cmd = agent.getLaunchCommand(makeLaunchConfig({ prompt: "test" }));
+    expect(cmd).toContain("isValidId=id=>/^ses_[A-Za-z0-9_-]+$/.test(id)");
+    expect(cmd).toContain("isValidId(r.id)");
+  });
+
   it("pipes JSON output into node instead of treating the session id as a command", () => {
     const cmd = agent.getLaunchCommand(makeLaunchConfig({ prompt: "Fix it" }));
     expect(cmd).toContain("| node -e");
