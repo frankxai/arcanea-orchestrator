@@ -2399,6 +2399,29 @@ describe("remap", () => {
 });
 
 describe("spawnOrchestrator", () => {
+  it("blocks orchestrator spawn while the project is globally paused", async () => {
+    writeMetadata(sessionsDir, "app-orchestrator", {
+      worktree: join(tmpDir, "my-app"),
+      branch: "main",
+      status: "working",
+      role: "orchestrator",
+      project: "my-app",
+      runtimeHandle: JSON.stringify(makeHandle("rt-orchestrator")),
+    });
+    updateMetadata(sessionsDir, "app-orchestrator", {
+      globalPauseUntil: new Date(Date.now() + 60_000).toISOString(),
+      globalPauseReason: "Rate limit reached",
+      globalPauseSource: "app-9",
+    });
+
+    const sm = createSessionManager({ config, registry: mockRegistry });
+
+    await expect(sm.spawnOrchestrator({ projectId: "my-app" })).rejects.toThrow(
+      "Project is paused due to model rate limit until",
+    );
+    expect(mockRuntime.create).not.toHaveBeenCalled();
+  });
+
   it("creates orchestrator session with correct ID", async () => {
     const sm = createSessionManager({ config, registry: mockRegistry });
 

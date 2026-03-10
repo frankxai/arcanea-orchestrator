@@ -998,6 +998,13 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
       throw new Error(`Unknown project: ${orchestratorConfig.projectId}`);
     }
 
+    const pause = getProjectPause(project);
+    if (pause) {
+      throw new Error(
+        `Project is paused due to model rate limit until ${pause.until.toISOString()} (${pause.reason}; source: ${pause.sourceSessionId})`,
+      );
+    }
+
     const plugins = resolvePlugins(project);
     if (!plugins.runtime) {
       throw new Error(`Runtime plugin '${project.runtime ?? config.defaults.runtime}' not found`);
