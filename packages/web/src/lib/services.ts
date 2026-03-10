@@ -14,11 +14,13 @@ import {
   loadConfig,
   createPluginRegistry,
   createSessionManager,
+  createLifecycleManager,
   type OrchestratorConfig,
   type PluginRegistry,
   type SessionManager,
   type SCM,
   type ProjectConfig,
+  type LifecycleManager,
 } from "@composio/ao-core";
 
 // Static plugin imports — webpack needs these to be string literals
@@ -82,3 +84,14 @@ export function getSCM(registry: PluginRegistry, project: ProjectConfig | undefi
   return registry.get<SCM>("scm", project.scm.plugin);
 }
 
+export function createScopedLifecycleManager(
+  services: Services,
+  projectId?: string,
+): LifecycleManager {
+  return createLifecycleManager({
+    config: services.config,
+    registry: services.registry,
+    sessionManager: services.sessionManager,
+    projectId,
+  });
+}

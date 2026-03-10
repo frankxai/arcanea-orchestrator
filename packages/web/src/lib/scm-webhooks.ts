@@ -1,0 +1,72 @@
+import type {
+  OrchestratorConfig,
+  PluginRegistry,
+  ProjectConfig,
+  SCM,
+  SCMWebhookEvent,
+  SCMWebhookRequest,
+  Session,
+} from "@composio/ao-core";
+
+export interface WebhookProjectMatch {
+  projectId: string;
+  project: ProjectConfig;
+  scm: SCM;
+}
+
+export function requestHeadersToRecord(headers: Headers): Record<string, string> {
+  const record: Record<string, string> = {};
+  headers.forEach((value, key) => {
+    record[key] = value;
+  });
+  return record;
+}
+
+export function getProjectWebhookPath(project: ProjectConfig): string | null {
+  if (!project.scm?.webhook || project.scm.webhook.enabled === false) return null;
+  return project.scm.webhook.path ?? `/api/webhooks/${project.scm.plugin}`;
+}
+
+export function findWebhookProjects(
+  config: OrchestratorConfig,
+  registry: PluginRegistry,
+  pathname: string,
+): WebhookProjectMatch[] {
+  return Object.entries(config.projects).flatMap(([projectId, project]) => {
+    if (!project.scm) return [];
+    const webhookPath = getProjectWebhookPath(project);
+    if (!webhookPath || webhookPath !== pathname) return [];
+    const scm = registry.get<SCM>("scm", project.scm.plugin);
+    if (!scm?.parseWebhook || !scm.verifyWebhook) return [];
+    return [{ projectId, project, scm }];
+  });
+}
+
+export function eventMatchesProject(event: SCMWebhookEvent, project: ProjectConfig): boolean {
+  if (!event.repository) return true;
+  return `${event.repository.owner}/${event.repository.name}` === project.repo;
+}
+
+export function findAffectedSessions(
+  sessions: Session[],
+  projectId: string,
+  event: SCMWebhookEvent,
+): Session[] {
+  return sessions.filter((session) => {
+    if (session.projectId !== projectId) return false;
+    if (event.prNumber !== undefined && session.pr?.number === event.prNumber) return true;
+    if (event.branch && session.branch === event.branch) return true;
+    return false;
+  });
+}
+
+export function buildWebhookRequest(request: Request, body: string): SCMWebhookRequest {
+  const url = new URL(request.url);
+  return {
+    method: request.method,
+    headers: requestHeadersToRecord(request.headers),
+    body,
+    path: url.pathname,
+    query: Object.fromEntries(url.searchParams.entries()),
+  };
+}

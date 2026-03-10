@@ -7,7 +7,10 @@ import {
   type OrchestratorConfig,
   type PluginRegistry,
   type SCM,
+  type LifecycleManager,
 } from "@composio/ao-core";
+import * as serialize from "@/lib/serialize";
+import { createScopedLifecycleManager, getSCM } from "@/lib/services";
 
 // ── Mock Data ─────────────────────────────────────────────────────────
 // Provides test sessions covering the key states the dashboard needs.
@@ -99,6 +102,22 @@ const mockSessionManager: SessionManager = {
 
 const mockSCM: SCM = {
   name: "github",
+  verifyWebhook: vi.fn(async () => ({
+    ok: true,
+    eventType: "pull_request",
+    deliveryId: "delivery-1",
+  })),
+  parseWebhook: vi.fn(async () => ({
+    provider: "github",
+    kind: "pull_request",
+    action: "opened",
+    rawEventType: "pull_request",
+    deliveryId: "delivery-1",
+    repository: { owner: "acme", name: "my-app" },
+    prNumber: 432,
+    branch: "feat/health-check",
+    data: {},
+  })),
   detectPR: vi.fn(async () => null),
   getPRState: vi.fn(async () => "open" as const),
   mergePR: vi.fn(async () => {}),
@@ -126,6 +145,13 @@ const mockRegistry: PluginRegistry = {
   loadFromConfig: vi.fn(async () => {}),
 };
 
+const mockLifecycleManager: LifecycleManager = {
+  start: vi.fn(),
+  stop: vi.fn(),
+  getStates: vi.fn(() => new Map()),
+  check: vi.fn(async () => {}),
+};
+
 const mockConfig: OrchestratorConfig = {
   configPath: "/tmp/ao-test/agent-orchestrator.yaml",
   port: 3000,
@@ -138,7 +164,7 @@ const mockConfig: OrchestratorConfig = {
       path: "/tmp/my-app",
       defaultBranch: "main",
       sessionPrefix: "my-app",
-      scm: { plugin: "github" },
+      scm: { plugin: "github", webhook: {} },
     },
   },
   notifiers: {},
@@ -153,6 +179,7 @@ vi.mock("@/lib/services", () => ({
     sessionManager: mockSessionManager,
   })),
   getSCM: vi.fn(() => mockSCM),
+  createScopedLifecycleManager: vi.fn(() => mockLifecycleManager),
 }));
 
 // ── Import routes after mocking ───────────────────────────────────────
@@ -166,6 +193,7 @@ import { POST as restorePOST } from "@/app/api/sessions/[id]/restore/route";
 import { POST as remapPOST } from "@/app/api/sessions/[id]/remap/route";
 import { POST as mergePOST } from "@/app/api/prs/[id]/merge/route";
 import { GET as eventsGET } from "@/app/api/events/route";
+import { POST as webhookPOST } from "@/app/api/webhooks/[...slug]/route";
 
 function makeRequest(url: string, init?: RequestInit): NextRequest {
   return new NextRequest(
@@ -181,6 +209,22 @@ beforeEach(() => {
   (mockSessionManager.get as ReturnType<typeof vi.fn>).mockImplementation(
     async (id: string) => testSessions.find((s) => s.id === id) ?? null,
   );
+  (mockSCM.verifyWebhook as ReturnType<typeof vi.fn>).mockResolvedValue({
+    ok: true,
+    eventType: "pull_request",
+    deliveryId: "delivery-1",
+  });
+  (mockSCM.parseWebhook as ReturnType<typeof vi.fn>).mockResolvedValue({
+    provider: "github",
+    kind: "pull_request",
+    action: "opened",
+    rawEventType: "pull_request",
+    deliveryId: "delivery-1",
+    repository: { owner: "acme", name: "my-app" },
+    prNumber: 432,
+    branch: "feat/health-check",
+    data: {},
+  });
 });
 
 describe("API Routes", () => {
@@ -508,6 +552,58 @@ describe("API Routes", () => {
       expect(event.sessions.length).toBeGreaterThan(0);
       expect(event.sessions[0]).toHaveProperty("id");
       expect(event.sessions[0]).toHaveProperty("attentionLevel");
+    });
+  });
+
+  describe("POST /api/webhooks/[...slug]", () => {
+    it("verifies webhook and triggers lifecycle checks for matching sessions", async () => {
+      const req = makeRequest("/api/webhooks/github", {
+        method: "POST",
+        body: JSON.stringify({ any: "payload" }),
+        headers: {
+          "Content-Type": "application/json",
+          "x-github-event": "pull_request",
+          "x-github-delivery": "delivery-1",
+        },
+      });
+
+      const res = await webhookPOST(req);
+      expect(res.status).toBe(202);
+      expect(createScopedLifecycleManager).toHaveBeenCalled();
+      expect(mockLifecycleManager.check).toHaveBeenCalledWith("backend-7");
+      const data = await res.json();
+      expect(data.sessionIds).toEqual(["backend-7"]);
+    });
+
+    it("returns 401 when webhook verification fails", async () => {
+      (mockSCM.verifyWebhook as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: false,
+        reason: "Webhook signature verification failed",
+      });
+
+      const req = makeRequest("/api/webhooks/github", {
+        method: "POST",
+        body: JSON.stringify({ any: "payload" }),
+        headers: {
+          "Content-Type": "application/json",
+          "x-github-event": "pull_request",
+        },
+      });
+
+      const res = await webhookPOST(req);
+      expect(res.status).toBe(401);
+      expect(mockLifecycleManager.check).not.toHaveBeenCalled();
+    });
+
+    it("returns 404 when no project is configured for the webhook path", async () => {
+      const req = makeRequest("/api/webhooks/gitlab", {
+        method: "POST",
+        body: JSON.stringify({ any: "payload" }),
+        headers: { "Content-Type": "application/json" },
+      });
+
+      const res = await webhookPOST(req);
+      expect(res.status).toBe(404);
     });
   });
 });
