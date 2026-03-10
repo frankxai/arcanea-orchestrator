@@ -1547,7 +1547,7 @@ describe("kill", () => {
     await expect(sm.kill("app-1")).resolves.toBeUndefined();
   });
 
-  it("does not purge mapped OpenCode session on default kill", async () => {
+  it("purges mapped OpenCode session on default kill", async () => {
     const deleteLogPath = join(tmpDir, "opencode-delete-kill-default.log");
     const mockBin = installMockOpencode("[]", deleteLogPath);
     process.env.PATH = `${mockBin}:${originalPath ?? ""}`;
@@ -1565,7 +1565,8 @@ describe("kill", () => {
     const sm = createSessionManager({ config, registry: mockRegistry });
     await sm.kill("app-1");
 
-    expect(existsSync(deleteLogPath)).toBe(false);
+    const deleteLog = readFileSync(deleteLogPath, "utf-8");
+    expect(deleteLog).toContain("session delete ses_keep");
   });
 
   it("purges mapped OpenCode session when requested", async () => {
@@ -2545,6 +2546,62 @@ describe("spawnOrchestrator", () => {
     expect(existsSync(listLogPath)).toBe(false);
   });
 
+  it("destroys orphaned runtime when reuse strategy finds alive runtime but get returns null", async () => {
+    const opencodeAgent: Agent = {
+      ...mockAgent,
+      name: "opencode",
+    };
+    const registryWithOpenCode: PluginRegistry = {
+      ...mockRegistry,
+      get: vi.fn().mockImplementation((slot: string) => {
+        if (slot === "runtime") return mockRuntime;
+        if (slot === "agent") return opencodeAgent;
+        if (slot === "workspace") return mockWorkspace;
+        return null;
+      }),
+    };
+
+    const configWithReuse: OrchestratorConfig = {
+      ...config,
+      defaults: { ...config.defaults, agent: "opencode" },
+      projects: {
+        ...config.projects,
+        "my-app": {
+          ...config.projects["my-app"],
+          agent: "opencode",
+          orchestratorSessionStrategy: "reuse",
+        },
+      },
+    };
+
+    const orphanedHandle = makeHandle("rt-orphaned");
+    writeMetadata(sessionsDir, "app-orchestrator", {
+      worktree: join(tmpDir, "my-app"),
+      branch: "main",
+      status: "working",
+      role: "orchestrator",
+      project: "my-app",
+      agent: "opencode",
+      runtimeHandle: JSON.stringify(orphanedHandle),
+      createdAt: new Date().toISOString(),
+    });
+
+    vi.mocked(mockRuntime.isAlive).mockImplementation(async (handle: RuntimeHandle) => {
+      if (handle?.id === "rt-orphaned") {
+        deleteMetadata(sessionsDir, "app-orchestrator");
+        return true;
+      }
+      return false;
+    });
+
+    const sm = createSessionManager({ config: configWithReuse, registry: registryWithOpenCode });
+    const session = await sm.spawnOrchestrator({ projectId: "my-app" });
+
+    expect(session.id).toBe("app-orchestrator");
+    expect(mockRuntime.destroy).toHaveBeenCalledWith(orphanedHandle);
+    expect(mockRuntime.create).toHaveBeenCalled();
+  });
+
   it("reuses mapped OpenCode session id when strategy is reuse and runtime is restarted", async () => {
     const opencodeAgent: Agent = {
       ...mockAgent,
@@ -2844,6 +2901,27 @@ describe("spawnOrchestrator", () => {
 
     const meta = readMetadataRaw(sessionsDir, "app-orchestrator");
     expect(meta?.["orchestratorSessionReused"]).toBeUndefined();
+  });
+
+  it("respawns the orchestrator when stale metadata exists but the runtime is dead", async () => {
+    writeMetadata(sessionsDir, "app-orchestrator", {
+      worktree: join(tmpDir, "my-app"),
+      branch: "main",
+      status: "working",
+      project: "my-app",
+      role: "orchestrator",
+      runtimeHandle: JSON.stringify(makeHandle("rt-stale")),
+      createdAt: new Date().toISOString(),
+    });
+
+    vi.mocked(mockRuntime.isAlive).mockResolvedValueOnce(false);
+
+    const sm = createSessionManager({ config, registry: mockRegistry });
+    await sm.spawnOrchestrator({ projectId: "my-app" });
+
+    expect(mockRuntime.create).toHaveBeenCalledTimes(1);
+    const meta = readMetadataRaw(sessionsDir, "app-orchestrator");
+    expect(meta?.["runtimeHandle"]).toBe(JSON.stringify(makeHandle("rt-1")));
   });
 
   it("uses orchestratorModel when configured", async () => {
