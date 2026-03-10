@@ -12,8 +12,21 @@ export async function recoverSession(
   context: RecoveryContext,
 ): Promise<RecoveryResult> {
   const { sessionId, projectId, rawMetadata } = assessment;
+  const recoveryCount = rawMetadata["recoveryCount"]
+    ? parseInt(rawMetadata["recoveryCount"], 10) + 1
+    : 1;
 
   if (context.dryRun) {
+    if (recoveryCount > context.recoveryConfig.maxRecoveryAttempts) {
+      return {
+        success: true,
+        sessionId,
+        action: "escalate",
+        requiresManualIntervention: true,
+        reason: `Exceeded max recovery attempts (${context.recoveryConfig.maxRecoveryAttempts})`,
+      };
+    }
+
     return {
       success: true,
       sessionId,
@@ -23,9 +36,6 @@ export async function recoverSession(
 
   try {
     const now = new Date().toISOString();
-    const recoveryCount = rawMetadata["recoveryCount"]
-      ? parseInt(rawMetadata["recoveryCount"], 10) + 1
-      : 1;
     const preservedStatus = validateStatus(rawMetadata["status"]);
 
     const project = config.projects[projectId];

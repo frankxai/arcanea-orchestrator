@@ -167,15 +167,11 @@ export async function recoverSessionById(
 
   const assessment = await validateSession(scanned, config, registry, recoveryConfig);
 
-  if (dryRun) {
-    return {
-      success: true,
-      sessionId,
-      action: assessment.action,
-    };
-  }
-
   const result = await executeAction(assessment, config, registry, context);
+
+  if (dryRun) {
+    return result;
+  }
 
   const logAction = mapActionToLogAction(result.action, result.success);
   writeRecoveryLog(

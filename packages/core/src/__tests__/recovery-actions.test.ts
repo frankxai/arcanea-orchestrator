@@ -154,6 +154,37 @@ describe("recoverSession", () => {
     expect(result.action).toBe("escalate");
     expect(result.reason).toBe("Exceeded max recovery attempts (3)");
   });
+
+  it("dry-run recovery reports escalate when attempts exceed limit", async () => {
+    rootDir = join(tmpdir(), `ao-recovery-${randomUUID()}`);
+    mkdirSync(rootDir, { recursive: true });
+    mkdirSync(join(rootDir, "project"), { recursive: true });
+    writeFileSync(join(rootDir, "agent-orchestrator.yaml"), "projects: {}\n", "utf-8");
+
+    const config = makeConfig(rootDir);
+    const registry = makeRegistry();
+    const assessment = makeAssessment({
+      rawMetadata: {
+        ...makeAssessment().rawMetadata,
+        recoveryCount: "3",
+      },
+    });
+    const context = makeContext(rootDir, {
+      dryRun: true,
+      recoveryConfig: {
+        ...DEFAULT_RECOVERY_CONFIG,
+        logPath: join(rootDir, "recovery.log"),
+        maxRecoveryAttempts: 3,
+      },
+    });
+
+    const result = await recoverSession(assessment, config, registry, context);
+
+    expect(result.success).toBe(true);
+    expect(result.action).toBe("escalate");
+    expect(result.requiresManualIntervention).toBe(true);
+    expect(result.reason).toBe("Exceeded max recovery attempts (3)");
+  });
 });
 
 describe("escalateSession", () => {
