@@ -755,5 +755,67 @@ describe("API Routes", () => {
       expect(Array.isArray(data.parseErrors)).toBe(true);
       expect(data.parseErrors[0]).toMatch(/Invalid webhook payload/);
     });
+
+    it("continues lifecycle checks when one session check throws", async () => {
+      const matchingSessions: Session[] = [
+        makeSession({
+          id: "backend-7",
+          projectId: "my-app",
+          status: "working",
+          activity: "active",
+          pr: {
+            number: 432,
+            url: "https://github.com/acme/my-app/pull/432",
+            title: "feat: health check",
+            owner: "acme",
+            repo: "my-app",
+            branch: "feat/health-check",
+            baseBranch: "main",
+            isDraft: false,
+          },
+        }),
+        makeSession({
+          id: "backend-8",
+          projectId: "my-app",
+          status: "working",
+          activity: "active",
+          pr: {
+            number: 432,
+            url: "https://github.com/acme/my-app/pull/432",
+            title: "feat: health check",
+            owner: "acme",
+            repo: "my-app",
+            branch: "feat/health-check",
+            baseBranch: "main",
+            isDraft: false,
+          },
+        }),
+      ];
+
+      (mockSessionManager.list as ReturnType<typeof vi.fn>).mockResolvedValueOnce(matchingSessions);
+      (mockLifecycleManager.check as ReturnType<typeof vi.fn>)
+        .mockRejectedValueOnce(new Error("check failed"))
+        .mockResolvedValueOnce(undefined);
+
+      const req = makeRequest("/api/webhooks/github", {
+        method: "POST",
+        body: JSON.stringify({ any: "payload" }),
+        headers: {
+          "Content-Type": "application/json",
+          "x-github-event": "pull_request",
+        },
+      });
+
+      const res = await webhookPOST(req);
+      expect(res.status).toBe(202);
+      expect(mockLifecycleManager.check).toHaveBeenCalledTimes(2);
+
+      const data = await res.json();
+      expect(data.sessionIds).toContain("backend-7");
+      expect(data.sessionIds).toContain("backend-8");
+      expect(Array.isArray(data.lifecycleErrors)).toBe(true);
+      expect(data.lifecycleErrors[0]).toContain("backend-7");
+      expect(data.lifecycleErrors[0]).toContain("check failed");
+    });
   });
 });

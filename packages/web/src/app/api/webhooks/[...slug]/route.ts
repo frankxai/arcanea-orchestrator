@@ -52,6 +52,7 @@ export async function POST(request: Request): Promise<Response> {
     let verified = false;
     const errors: string[] = [];
     const parseErrors: string[] = [];
+    const lifecycleErrors: string[] = [];
 
     for (const candidate of candidates) {
       const verification = await candidate.scm.verifyWebhook?.(webhookRequest, candidate.project);
@@ -82,7 +83,12 @@ export async function POST(request: Request): Promise<Response> {
       const lifecycle = services.lifecycleManager;
       for (const session of affectedSessions) {
         sessionIds.add(session.id);
-        await lifecycle.check(session.id);
+        try {
+          await lifecycle.check(session.id);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : "Lifecycle check failed";
+          lifecycleErrors.push(`session ${session.id}: ${message}`);
+        }
       }
     }
 
@@ -100,6 +106,7 @@ export async function POST(request: Request): Promise<Response> {
         sessionIds: [...sessionIds],
         matchedSessions: sessionIds.size,
         parseErrors,
+        lifecycleErrors,
       },
       { status: 202 },
     );
