@@ -9,7 +9,7 @@ type SessionLike = { id: string; projectId: string };
  * @param projectId - The project key to match against
  * @param projects - Projects config mapping
  */
-export function matchesProject(
+function matchesProject(
   session: SessionLike,
   projectId: string,
   projects: Record<string, ProjectWithPrefix>,
@@ -20,7 +20,7 @@ export function matchesProject(
   return false;
 }
 
-export function isOrchestratorSession(session: { id: string }): boolean {
+function isOrchestratorSession(session: { id: string }): boolean {
   return session.id.endsWith("-orchestrator");
 }
 
