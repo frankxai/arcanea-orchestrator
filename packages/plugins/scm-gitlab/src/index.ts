@@ -4,7 +4,7 @@
  * Uses the `glab` CLI for GitLab API interactions.
  */
 
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import {
   CI_STATUS,
   type PluginModule,
@@ -135,10 +135,9 @@ function getGitLabWebhookConfig(project: ProjectConfig) {
 }
 
 function verifyGitLabToken(secret: string, providedToken: string): boolean {
-  const expectedBuffer = Buffer.from(secret, "utf8");
-  const providedBuffer = Buffer.from(providedToken, "utf8");
-  if (expectedBuffer.length !== providedBuffer.length) return false;
-  return timingSafeEqual(expectedBuffer, providedBuffer);
+  const expectedDigest = createHash("sha256").update(secret).digest();
+  const providedDigest = createHash("sha256").update(providedToken).digest();
+  return timingSafeEqual(expectedDigest, providedDigest);
 }
 
 function parseGitLabRepository(payload: Record<string, unknown>) {
@@ -161,16 +160,33 @@ function parseGitLabRepository(payload: Record<string, unknown>) {
   return { owner: namespace, name };
 }
 
+function isGitLabTagRef(
+  payload: Record<string, unknown>,
+  objectAttributes: Record<string, unknown> | undefined,
+): boolean {
+  return (
+    objectAttributes?.["tag"] === true ||
+    payload["ref_type"] === "tag" ||
+    payload["object_kind"] === "tag_push"
+  );
+}
+
 function parseGitLabCiBranch(
   payload: Record<string, unknown>,
   objectAttributes: Record<string, unknown> | undefined,
 ): string | undefined {
-  const isTag =
-    objectAttributes?.["tag"] === true ||
-    payload["ref_type"] === "tag" ||
-    payload["object_kind"] === "tag_push";
+  const isTag = isGitLabTagRef(payload, objectAttributes);
   if (isTag) return undefined;
   return parseWebhookBranchRef(payload["ref"] ?? objectAttributes?.["ref"]);
+}
+
+function parseGitLabPushBranch(
+  payload: Record<string, unknown>,
+  objectAttributes: Record<string, unknown> | undefined,
+): string | undefined {
+  const isTag = isGitLabTagRef(payload, objectAttributes);
+  if (isTag) return undefined;
+  return parseWebhookBranchRef(payload["ref"]);
 }
 
 function parseGitLabWebhookEvent(
@@ -302,7 +318,7 @@ function parseGitLabWebhookEvent(
       rawEventType,
       deliveryId,
       repository,
-      branch: parseWebhookBranchRef(payload["ref"]),
+      branch: parseGitLabPushBranch(payload, objectAttributes),
       sha:
         typeof payload["after"] === "string"
           ? (payload["after"] as string)

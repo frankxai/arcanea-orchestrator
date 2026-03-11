@@ -250,6 +250,34 @@ describe("scm-gitlab plugin", () => {
       );
     });
 
+    it("does not set branch for plain tag push refs", async () => {
+      const event = await scm.parseWebhook?.(
+        makeWebhookRequest({
+          headers: {
+            "x-gitlab-event": "Tag Push Hook",
+            "x-gitlab-event-uuid": "delivery-5",
+          },
+          body: JSON.stringify({
+            object_kind: "tag_push",
+            ref: "v1.0.0",
+            ref_type: "tag",
+            after: "def456",
+            event_created_at: "2026-03-11T01:00:00Z",
+            project: { path_with_namespace: "acme/repo" },
+          }),
+        }),
+        project,
+      );
+      expect(event).toEqual(
+        expect.objectContaining({
+          provider: "gitlab",
+          kind: "push",
+          branch: undefined,
+          sha: "def456",
+        }),
+      );
+    });
+
     it("does not set branch for tag pipeline refs", async () => {
       const event = await scm.parseWebhook?.(
         makeWebhookRequest({
