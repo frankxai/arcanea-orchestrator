@@ -233,11 +233,15 @@ async function startDashboard(
 ): Promise<ChildProcess> {
   const env = await buildDashboardEnv(port, configPath, terminalPort, directTerminalPort);
 
-  const child = spawn("pnpm", ["run", "dev"], {
+  const child = spawn("npx", ["next", "dev", "-p", String(port)], {
     cwd: webDir,
-    stdio: "inherit",
+    stdio: ["inherit", "inherit", "pipe"],
     detached: false,
     env,
+  });
+
+  child.stderr?.on("data", (data: Buffer) => {
+    process.stderr.write(data);
   });
 
   child.on("error", (err) => {
