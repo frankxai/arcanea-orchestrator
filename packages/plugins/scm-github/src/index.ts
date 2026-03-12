@@ -51,6 +51,8 @@ const BOT_AUTHORS = new Set([
   "lgtm-com[bot]",
 ]);
 
+const REVIEW_INTEGRITY_BOT_AUTHORS = new Set(["cursor[bot]"]);
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -443,7 +445,8 @@ function parseDate(val: string | undefined | null): Date {
 }
 
 function detectThreadSource(author: string): ReviewThreadSnapshot["source"] {
-  if (BOT_AUTHORS.has(author)) return "bugbot";
+  if (REVIEW_INTEGRITY_BOT_AUTHORS.has(author)) return "bugbot";
+  if (BOT_AUTHORS.has(author)) return "other";
   if (!author) return "other";
   return "human";
 }
