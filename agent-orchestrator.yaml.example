@@ -22,6 +22,18 @@ defaults:
   workspace: worktree     # worktree | clone | copy
   notifiers: [desktop]    # desktop | slack | discord | webhook | email
 
+# Runtime-specific settings
+# runtimes:
+#   docker:
+#     image: ghcr.io/your-org/ao-worker:latest
+#     shell: /bin/bash
+#     dashboardPorts: [3000]
+#     portRangeStart: 38000
+#     portRangeSize: 4000
+#     extraMounts:
+#       - ~/.npm:/root/.npm
+#     startupCommand: while true; do sleep 3600; done
+
 # Projects — at minimum, specify repo and path
 projects:
   my-app:
@@ -73,6 +85,12 @@ projects:
 
     # OpenCode issue session strategy (only for agent: opencode)
     # opencodeIssueSessionStrategy: reuse   # reuse | delete | ignore
+
+    # OpenCode orchestrator session strategy (only for agent: opencode)
+    # Controls how the orchestrator's OpenCode session is managed
+    # orchestratorSessionStrategy: reuse    # reuse | delete | ignore
+
+    # runtime: docker
 
     # Per-project reaction overrides
     # reactions:

@@ -72,6 +72,8 @@ ao spawn my-project 123    # GitHub issue, Linear ticket, or ad-hoc
 
 Dashboard opens at `http://localhost:3000`. Run `ao status` for the CLI view.
 
+For Docker-isolated workers, configure `runtimes.docker` and set a project `runtime: docker`. AO will create a per-session Compose project, mount the worktree and `AO_DATA_DIR`, deterministically lease host ports for configured `dashboardPorts`, and expose the first preview link as `dashboardUrl` metadata.
+
 ## How It Works
 
 ```
@@ -89,16 +91,16 @@ ao spawn my-project 123
 
 Eight slots. Every abstraction is swappable.
 
-| Slot | Default | Alternatives |
-|------|---------|-------------|
-| Runtime | tmux | docker, k8s, process |
-| Agent | claude-code | codex, aider, opencode |
-| Workspace | worktree | clone |
-| Tracker | github | linear |
-| SCM | github | — |
-| Notifier | desktop | slack, composio, webhook |
-| Terminal | iterm2 | web |
-| Lifecycle | core | — |
+| Slot      | Default     | Alternatives             |
+| --------- | ----------- | ------------------------ |
+| Runtime   | tmux        | docker, k8s, process     |
+| Agent     | claude-code | codex, aider, opencode   |
+| Workspace | worktree    | clone                    |
+| Tracker   | github      | linear                   |
+| SCM       | github      | —                        |
+| Notifier  | desktop     | slack, composio, webhook |
+| Terminal  | iterm2      | web                      |
+| Lifecycle | core        | —                        |
 
 All interfaces defined in [`packages/core/src/types.ts`](packages/core/src/types.ts). A plugin implements one interface and exports a `PluginModule`. That's it.
 
@@ -107,6 +109,12 @@ All interfaces defined in [`packages/core/src/types.ts`](packages/core/src/types
 ```yaml
 # agent-orchestrator.yaml
 port: 3000
+
+runtimes:
+  docker:
+    image: ghcr.io/your-org/ao-worker:latest
+    dashboardPorts: [3000]
+    portRangeStart: 38000
 
 defaults:
   runtime: tmux
@@ -120,6 +128,7 @@ projects:
     path: ~/my-app
     defaultBranch: main
     sessionPrefix: app
+    # runtime: docker
 
 reactions:
   ci-failed:
@@ -131,13 +140,20 @@ reactions:
     action: send-to-agent
     escalateAfter: 30m
   approved-and-green:
-    auto: false       # flip to true for auto-merge
+    auto: false # flip to true for auto-merge
     action: notify
 ```
 
 CI fails → agent gets the logs and fixes it. Reviewer requests changes → agent addresses them. PR approved with green CI → you get a notification to merge.
 
 See [`agent-orchestrator.yaml.example`](agent-orchestrator.yaml.example) for the full reference.
+
+Docker runtime notes:
+
+- Each AO session gets its own Compose project/network and its own worktree mount.
+- `AO_DATA_DIR` is bind-mounted into the container so existing metadata updates keep working.
+- Host dashboard ports are deterministically leased and released during `ao session kill`, `ao session cleanup`, and archived resource cleanup retries.
+- Interactive control stays compatible with current workflows because AO still drives the worker through tmux; tmux attaches into the container shell with `docker compose exec`.
 
 ## CLI
 
@@ -178,12 +194,12 @@ See [CLAUDE.md](CLAUDE.md) for code conventions and architecture details.
 
 ## Documentation
 
-| Doc | What it covers |
-|-----|---------------|
-| [Setup Guide](SETUP.md) | Detailed installation and configuration |
-| [Examples](examples/) | Config templates (GitHub, Linear, multi-project, auto-merge) |
-| [CLAUDE.md](CLAUDE.md) | Architecture, conventions, plugin pattern |
-| [Troubleshooting](TROUBLESHOOTING.md) | Common issues and fixes |
+| Doc                                   | What it covers                                               |
+| ------------------------------------- | ------------------------------------------------------------ |
+| [Setup Guide](SETUP.md)               | Detailed installation and configuration                      |
+| [Examples](examples/)                 | Config templates (GitHub, Linear, multi-project, auto-merge) |
+| [CLAUDE.md](CLAUDE.md)                | Architecture, conventions, plugin pattern                    |
+| [Troubleshooting](TROUBLESHOOTING.md) | Common issues and fixes                                      |
 
 ## Contributing
 
