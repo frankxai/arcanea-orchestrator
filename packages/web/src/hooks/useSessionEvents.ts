@@ -152,11 +152,10 @@ export function useSessionEvents(
         const data = JSON.parse(event.data as string) as { type: string };
         if (data.type === "snapshot") {
           const snapshot = data as SSESnapshotEvent;
-          const workerPatches = snapshot.sessions.filter((s) => !s.id.endsWith("-orchestrator"));
-          dispatch({ type: "snapshot", patches: workerPatches });
+          dispatch({ type: "snapshot", patches: snapshot.sessions });
 
           const currentMembershipKey = createMembershipKey(sessionsRef.current);
-          const snapshotMembershipKey = createMembershipKey(workerPatches);
+          const snapshotMembershipKey = createMembershipKey(snapshot.sessions);
 
           if (currentMembershipKey !== snapshotMembershipKey) {
             pendingMembershipKeyRef.current = snapshotMembershipKey;
