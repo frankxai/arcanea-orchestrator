@@ -10,6 +10,7 @@ import {
   TERMINAL_STATUSES,
   readMetadata,
   updateMetadata,
+  isOrchestratorSession,
   type Session,
   type Agent,
   type SCM,
@@ -20,8 +21,13 @@ import {
   type OrchestratorConfig,
   type PluginRegistry,
 } from "@composio/ao-core";
-import { isPRRateLimited } from "./types";
-import type { DashboardSession, DashboardPR, DashboardStats } from "./types.js";
+import {
+  isPRRateLimited,
+  type DashboardSession,
+  type DashboardPR,
+  type DashboardStats,
+  type DashboardOrchestratorLink,
+} from "./types";
 import {
   TTLCache,
   prCache,
@@ -69,14 +75,26 @@ export function sessionToDashboard(session: Session): DashboardSession {
     issueLabel: null, // Will be enriched by enrichSessionIssue()
     issueTitle: null, // Will be enriched by enrichSessionIssueTitle()
     summary,
-    summaryIsFallback: agentSummary
-      ? (session.agentInfo?.summaryIsFallback ?? false)
-      : false,
+    summaryIsFallback: agentSummary ? (session.agentInfo?.summaryIsFallback ?? false) : false,
     createdAt: session.createdAt.toISOString(),
     lastActivityAt: session.lastActivityAt.toISOString(),
     pr: session.pr ? basicPRToDashboard(session.pr) : null,
     metadata: session.metadata,
   };
+}
+
+export function listDashboardOrchestrators(
+  sessions: Session[],
+  projects: Record<string, ProjectConfig>,
+): DashboardOrchestratorLink[] {
+  return sessions
+    .filter((session) => isOrchestratorSession(session))
+    .map((session) => ({
+      id: session.id,
+      projectId: session.projectId,
+      projectName: projects[session.projectId]?.name ?? session.projectId,
+    }))
+    .sort((a, b) => a.projectName.localeCompare(b.projectName) || a.id.localeCompare(b.id));
 }
 
 /**

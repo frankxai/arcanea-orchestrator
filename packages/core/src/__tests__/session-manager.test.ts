@@ -1,9 +1,18 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+  existsSync,
+  utimesSync,
+} from "node:fs";
 import { join } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { createSessionManager } from "../session-manager.js";
+import { validateConfig } from "../config.js";
 import {
   writeMetadata,
   readMetadata,
@@ -25,6 +34,7 @@ import {
   type Tracker,
   type SCM,
   type RuntimeHandle,
+  type Session,
 } from "../types.js";
 
 let tmpDir: string;
@@ -74,6 +84,55 @@ function installMockOpencode(
   return binDir;
 }
 
+function installMockOpencodeSequence(
+  sessionListJsons: string[],
+  deleteLogPath: string,
+  listLogPath?: string,
+): string {
+  const binDir = join(tmpDir, "mock-bin-sequence");
+  mkdirSync(binDir, { recursive: true });
+  const scriptPath = join(binDir, "opencode");
+  const sequencePath = join(tmpDir, `opencode-sequence-${randomUUID()}.txt`);
+  writeFileSync(sequencePath, "0\n", "utf-8");
+
+  const cases = sessionListJsons
+    .map((entry, index) => {
+      const escaped = entry.replace(/'/g, "'\\''");
+      return `if [[ "$idx" == "${index}" ]]; then printf '%s\\n' '${escaped}'; exit 0; fi`;
+    })
+    .join("\n");
+  const final = sessionListJsons.at(-1)?.replace(/'/g, "'\\''") ?? "[]";
+
+  writeFileSync(
+    scriptPath,
+    [
+      "#!/usr/bin/env bash",
+      "set -euo pipefail",
+      'if [[ "$1" == "session" && "$2" == "list" ]]; then',
+      listLogPath ? `  printf '%s\n' "$*" >> '${listLogPath.replace(/'/g, "'\\''")}'` : "",
+      `  seq_file='${sequencePath.replace(/'/g, "'\\''")}'`,
+      '  idx=$(cat "$seq_file")',
+      "  next=$((idx + 1))",
+      '  printf "%s\n" "$next" > "$seq_file"',
+      `  ${cases}`,
+      `  printf '%s\\n' '${final}'`,
+      "  exit 0",
+      "fi",
+      'if [[ "$1" == "session" && "$2" == "delete" ]]; then',
+      `  printf '%s\n' "$*" >> '${deleteLogPath.replace(/'/g, "'\\''")}'`,
+      "  exit 0",
+      "fi",
+      "exit 1",
+      "",
+    ]
+      .filter(Boolean)
+      .join("\n"),
+    "utf-8",
+  );
+  chmodSync(scriptPath, 0o755);
+  return binDir;
+}
+
 function installMockOpencodeWithNotFoundDelete(sessionListJson: string): string {
   const binDir = join(tmpDir, "mock-bin-not-found");
   mkdirSync(binDir, { recursive: true });
@@ -90,6 +149,32 @@ function installMockOpencodeWithNotFoundDelete(sessionListJson: string): string 
       'if [[ "$1" == "session" && "$2" == "delete" ]]; then',
       '  printf "Error: Session not found: %s\\n" "$3" >&2',
       "  exit 1",
+      "fi",
+      "exit 1",
+      "",
+    ].join("\n"),
+    "utf-8",
+  );
+  chmodSync(scriptPath, 0o755);
+  return binDir;
+}
+
+function installMockGit(remoteBranches: string[]): string {
+  const binDir = join(tmpDir, "mock-git-bin");
+  mkdirSync(binDir, { recursive: true });
+  const scriptPath = join(binDir, "git");
+  const refs = remoteBranches
+    .map((branch) => `deadbeef\trefs/heads/${branch}`)
+    .join("\\n")
+    .replace(/'/g, "'\\''");
+  writeFileSync(
+    scriptPath,
+    [
+      "#!/usr/bin/env bash",
+      "set -euo pipefail",
+      'if [[ "$1" == "ls-remote" && "$2" == "--heads" && "$3" == "origin" ]]; then',
+      `  printf '%b\\n' '${refs}'`,
+      "  exit 0",
       "fi",
       "exit 1",
       "",
@@ -363,6 +448,32 @@ describe("spawn", () => {
 
     const session = await sm.spawn({ projectId: "my-app" });
     expect(session.id).toBe("app-8");
+  });
+
+  it("does not reuse a killed session branch on recreate", async () => {
+    const sm = createSessionManager({ config, registry: mockRegistry });
+
+    const first = await sm.spawn({ projectId: "my-app" });
+    expect(first.id).toBe("app-1");
+    expect(first.branch).toBe("session/app-1");
+
+    await sm.kill(first.id);
+
+    const second = await sm.spawn({ projectId: "my-app" });
+    expect(second.id).toBe("app-2");
+    expect(second.branch).toBe("session/app-2");
+  });
+
+  it("skips remote session branches when allocating a fresh session id", async () => {
+    const mockGitBin = installMockGit(["session/app-22"]);
+    process.env.PATH = `${mockGitBin}:${originalPath ?? ""}`;
+    mkdirSync(config.projects["my-app"]!.path, { recursive: true });
+
+    const sm = createSessionManager({ config, registry: mockRegistry });
+    const session = await sm.spawn({ projectId: "my-app" });
+
+    expect(session.id).toBe("app-23");
+    expect(session.branch).toBe("session/app-23");
   });
 
   it("writes metadata file", async () => {
@@ -708,6 +819,60 @@ describe("spawn", () => {
       const meta = readMetadataRaw(sessionsDir, "app-1");
       expect(meta).not.toBeNull();
       expect(meta!["agent"]).toBe("mock-agent");
+    });
+
+    it("uses project worker agent when configured and no spawn override is provided", async () => {
+      const configWithWorkerAgent: OrchestratorConfig = {
+        ...config,
+        projects: {
+          ...config.projects,
+          "my-app": {
+            ...config.projects["my-app"],
+            agent: "mock-agent",
+            worker: {
+              agent: "codex",
+            },
+          },
+        },
+      };
+
+      const sm = createSessionManager({
+        config: configWithWorkerAgent,
+        registry: registryWithMultipleAgents,
+      });
+      await sm.spawn({ projectId: "my-app" });
+
+      expect(mockCodexAgent.getLaunchCommand).toHaveBeenCalled();
+      expect(mockAgent.getLaunchCommand).not.toHaveBeenCalled();
+      expect(readMetadataRaw(sessionsDir, "app-1")?.["agent"]).toBe("codex");
+    });
+
+    it("uses defaults worker agent when project agent is not set", async () => {
+      const configWithDefaultWorkerAgent: OrchestratorConfig = {
+        ...config,
+        defaults: {
+          ...config.defaults,
+          worker: {
+            agent: "codex",
+          },
+        },
+        projects: {
+          ...config.projects,
+          "my-app": {
+            ...config.projects["my-app"],
+            agent: undefined,
+          },
+        },
+      };
+
+      const sm = createSessionManager({
+        config: configWithDefaultWorkerAgent,
+        registry: registryWithMultipleAgents,
+      });
+      await sm.spawn({ projectId: "my-app" });
+
+      expect(mockCodexAgent.getLaunchCommand).toHaveBeenCalled();
+      expect(readMetadataRaw(sessionsDir, "app-1")?.["agent"]).toBe("codex");
     });
 
     it("readMetadata returns agent field (typed SessionMetadata)", async () => {
@@ -1080,6 +1245,32 @@ describe("list", () => {
     expect(sessions.map((s) => s.id).sort()).toEqual(["app-1", "app-2"]);
   });
 
+  it("preserves lastActivityAt when read-time repair rewrites metadata", async () => {
+    writeMetadata(sessionsDir, "app-orchestrator", {
+      worktree: config.projects["my-app"]!.path,
+      branch: "main",
+      status: "merged",
+      project: "my-app",
+      pr: "https://github.com/org/my-app/pull/42",
+      runtimeHandle: JSON.stringify(makeHandle("rt-orch")),
+    });
+
+    const oldTime = new Date("2026-01-01T00:00:00.000Z");
+    utimesSync(join(sessionsDir, "app-orchestrator"), oldTime, oldTime);
+
+    const sm = createSessionManager({ config, registry: mockRegistry });
+    const sessions = await sm.list("my-app");
+    const orchestrator = sessions.find((session) => session.id === "app-orchestrator");
+
+    expect(orchestrator).toBeDefined();
+    expect(orchestrator!.lastActivityAt.getTime()).toBe(oldTime.getTime());
+
+    const repaired = readMetadataRaw(sessionsDir, "app-orchestrator");
+    expect(repaired!["pr"]).toBeUndefined();
+    expect(repaired!["prAutoDetect"]).toBe("off");
+    expect(repaired!["status"]).toBe("working");
+  });
+
   it("filters by project ID", async () => {
     // In hash-based architecture, each project has its own directory
     // so filtering is implicit. This test verifies list(projectId) only
@@ -1096,6 +1287,20 @@ describe("list", () => {
 
     expect(sessions).toHaveLength(1);
     expect(sessions[0].id).toBe("app-1");
+  });
+
+  it("preserves owning project ID for legacy metadata missing the project field", async () => {
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "a",
+      status: "working",
+    });
+
+    const sm = createSessionManager({ config, registry: mockRegistry });
+    const sessions = await sm.list("my-app");
+
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0].projectId).toBe("my-app");
   });
 
   it("clears enrichment timeout when enrichment completes quickly", async () => {
@@ -1181,6 +1386,89 @@ describe("list", () => {
     expect(agentWithState.getActivityState).toHaveBeenCalled();
     // Verify activity state was set
     expect(sessions[0].activity).toBe("active");
+  });
+
+  it.each(["claude-code", "codex", "aider", "opencode"])(
+    "uses tmuxName fallback handle for %s activity detection when runtimeHandle is missing",
+    async (agentName: string) => {
+      const expectedTmuxName = "hash-app-1";
+      const selectedAgent: Agent = {
+        ...mockAgent,
+        name: agentName,
+        getActivityState: vi.fn().mockImplementation(async (session: Session) => {
+          return {
+            state: session.runtimeHandle?.id === expectedTmuxName ? "active" : "exited",
+          };
+        }),
+      };
+      const registryWithNamedAgents: PluginRegistry = {
+        ...mockRegistry,
+        get: vi.fn().mockImplementation((slot: string, name: string) => {
+          if (slot === "runtime") return mockRuntime;
+          if (slot === "agent" && name === agentName) return selectedAgent;
+          if (slot === "workspace") return mockWorkspace;
+          return null;
+        }),
+      };
+
+      writeMetadata(sessionsDir, "app-1", {
+        worktree: "/tmp",
+        branch: "a",
+        status: "working",
+        project: "my-app",
+        agent: agentName,
+        tmuxName: expectedTmuxName,
+        ...(agentName === "opencode" ? { opencodeSessionId: "ses_existing_mapping" } : {}),
+      });
+
+      const sm = createSessionManager({ config, registry: registryWithNamedAgents });
+      const sessions = await sm.list("my-app");
+
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0].runtimeHandle?.id).toBe(expectedTmuxName);
+      expect(sessions[0].activity).toBe("active");
+      expect(selectedAgent.getActivityState).toHaveBeenCalled();
+    },
+  );
+
+  it("uses tmuxName fallback handle for runtime liveness checks when runtimeHandle is missing", async () => {
+    const expectedTmuxName = "hash-app-1";
+    const deadRuntime: Runtime = {
+      ...mockRuntime,
+      isAlive: vi
+        .fn()
+        .mockImplementation(async (handle: RuntimeHandle) => handle.id !== expectedTmuxName),
+    };
+    const agentWithSpy: Agent = {
+      ...mockAgent,
+      getActivityState: vi.fn().mockResolvedValue({ state: "active" }),
+    };
+    const registryWithDeadRuntime: PluginRegistry = {
+      ...mockRegistry,
+      get: vi.fn().mockImplementation((slot: string) => {
+        if (slot === "runtime") return deadRuntime;
+        if (slot === "agent") return agentWithSpy;
+        if (slot === "workspace") return mockWorkspace;
+        return null;
+      }),
+    };
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "a",
+      status: "working",
+      project: "my-app",
+      tmuxName: expectedTmuxName,
+    });
+
+    const sm = createSessionManager({ config, registry: registryWithDeadRuntime });
+    const sessions = await sm.list("my-app");
+
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0].runtimeHandle?.id).toBe(expectedTmuxName);
+    expect(sessions[0].status).toBe("killed");
+    expect(sessions[0].activity).toBe("exited");
+    expect(agentWithSpy.getActivityState).not.toHaveBeenCalled();
   });
 
   it("keeps existing activity when getActivityState throws", async () => {
@@ -1362,6 +1650,20 @@ describe("get", () => {
   it("returns null for nonexistent session", async () => {
     const sm = createSessionManager({ config, registry: mockRegistry });
     expect(await sm.get("nonexistent")).toBeNull();
+  });
+
+  it("assigns owning project ID when loading legacy metadata without project", async () => {
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "working",
+    });
+
+    const sm = createSessionManager({ config, registry: mockRegistry });
+    const session = await sm.get("app-1");
+
+    expect(session).not.toBeNull();
+    expect(session?.projectId).toBe("my-app");
   });
 
   it("auto-discovers and persists OpenCode session mapping when missing", async () => {
@@ -2098,6 +2400,38 @@ describe("send", () => {
     );
   });
 
+  it("waits for spawning sessions to become interactive before considering restore", async () => {
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "spawning",
+      project: "my-app",
+      runtimeHandle: JSON.stringify(makeHandle("rt-1")),
+    });
+
+    vi.mocked(mockRuntime.isAlive).mockResolvedValue(true);
+    vi.mocked(mockAgent.isProcessRunning)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(true);
+    vi.mocked(mockRuntime.getOutput)
+      .mockResolvedValueOnce("Bootstrapping OpenCode...")
+      .mockResolvedValueOnce("OpenCode ready")
+      .mockResolvedValueOnce("OpenCode ready")
+      .mockResolvedValueOnce("OpenCode ready")
+      .mockResolvedValueOnce("processed message");
+
+    const sm = createSessionManager({ config, registry: mockRegistry });
+    await sm.send("app-1", "wait until interactive");
+
+    expect(mockRuntime.create).not.toHaveBeenCalled();
+    expect(mockRuntime.sendMessage).toHaveBeenCalledWith(
+      makeHandle("rt-1"),
+      "wait until interactive",
+    );
+  });
+
   it("resolves when delivery cannot be confirmed (message already sent)", async () => {
     writeMetadata(sessionsDir, "app-1", {
       worktree: "/tmp",
@@ -2199,6 +2533,102 @@ describe("send", () => {
     const meta = readMetadataRaw(sessionsDir, "app-1");
     expect(meta?.["opencodeSessionId"]).toBe("ses_send_discovered_valid");
     expect(mockRuntime.sendMessage).toHaveBeenCalledWith(makeHandle("rt-1"), "hello");
+  });
+
+  it("confirms OpenCode delivery from session updated timestamps", async () => {
+    const deleteLogPath = join(tmpDir, "opencode-send-confirmation.log");
+    const listLogPath = join(tmpDir, "opencode-send-confirmation-list.log");
+    const mockBin = installMockOpencodeSequence(
+      [
+        JSON.stringify([
+          {
+            id: "ses_send_confirmed",
+            title: "AO:app-1",
+            updated: "2026-01-01T00:00:00.000Z",
+          },
+        ]),
+        JSON.stringify([
+          {
+            id: "ses_send_confirmed",
+            title: "AO:app-1",
+            updated: "2026-01-01T00:00:05.000Z",
+          },
+        ]),
+      ],
+      deleteLogPath,
+      listLogPath,
+    );
+    process.env.PATH = `${mockBin}:${originalPath ?? ""}`;
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "working",
+      project: "my-app",
+      agent: "opencode",
+      opencodeSessionId: "ses_send_confirmed",
+      runtimeHandle: JSON.stringify(makeHandle("rt-1")),
+    });
+
+    vi.mocked(mockRuntime.getOutput).mockResolvedValue("steady output");
+    vi.mocked(mockAgent.detectActivity).mockReturnValue("idle");
+
+    const sm = createSessionManager({ config, registry: mockRegistry });
+    const startedAt = Date.now();
+    await sm.send("app-1", "confirm via updated timestamp");
+    const elapsedMs = Date.now() - startedAt;
+
+    expect(elapsedMs).toBeLessThan(2_000);
+    expect(readFileSync(listLogPath, "utf-8").trim().split("\n").length).toBeGreaterThanOrEqual(2);
+    expect(mockRuntime.sendMessage).toHaveBeenCalledWith(
+      makeHandle("rt-1"),
+      "confirm via updated timestamp",
+    );
+  });
+
+  it("does not confirm OpenCode delivery from timestamp visibility alone", async () => {
+    const deleteLogPath = join(tmpDir, "opencode-send-no-false-positive.log");
+    const listLogPath = join(tmpDir, "opencode-send-no-false-positive-list.log");
+    const mockBin = installMockOpencodeSequence(
+      [
+        "[]",
+        JSON.stringify([
+          {
+            id: "ses_send_visibility_only",
+            title: "AO:app-1",
+            updated: "2026-01-01T00:00:00.000Z",
+          },
+        ]),
+      ],
+      deleteLogPath,
+      listLogPath,
+    );
+    process.env.PATH = `${mockBin}:${originalPath ?? ""}`;
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp",
+      branch: "main",
+      status: "working",
+      project: "my-app",
+      agent: "opencode",
+      opencodeSessionId: "ses_send_visibility_only",
+      runtimeHandle: JSON.stringify(makeHandle("rt-1")),
+    });
+
+    vi.mocked(mockRuntime.getOutput).mockResolvedValue("steady output");
+    vi.mocked(mockAgent.detectActivity).mockReturnValue("idle");
+
+    const sm = createSessionManager({ config, registry: mockRegistry });
+    const startedAt = Date.now();
+    await sm.send("app-1", "do not confirm on visibility");
+    const elapsedMs = Date.now() - startedAt;
+
+    expect(elapsedMs).toBeGreaterThanOrEqual(2_000);
+    expect(readFileSync(listLogPath, "utf-8").trim().split("\n").length).toBeGreaterThanOrEqual(2);
+    expect(mockRuntime.sendMessage).toHaveBeenCalledWith(
+      makeHandle("rt-1"),
+      "do not confirm on visibility",
+    );
   });
 });
 
@@ -3047,6 +3477,191 @@ describe("spawnOrchestrator", () => {
     );
   });
 
+  it("keeps orchestrator launch permissionless even when shared config sets permissions", async () => {
+    const configWithSharedPermissions: OrchestratorConfig = {
+      ...config,
+      projects: {
+        ...config.projects,
+        "my-app": {
+          ...config.projects["my-app"],
+          agentConfig: {
+            permissions: "suggest",
+          },
+        },
+      },
+    };
+
+    const sm = createSessionManager({
+      config: configWithSharedPermissions,
+      registry: mockRegistry,
+    });
+    await sm.spawnOrchestrator({ projectId: "my-app" });
+
+    expect(mockAgent.getLaunchCommand).toHaveBeenCalledWith(
+      expect.objectContaining({
+        permissions: "permissionless",
+        projectConfig: expect.objectContaining({
+          agentConfig: expect.objectContaining({ permissions: "permissionless" }),
+        }),
+      }),
+    );
+  });
+
+  it("uses project orchestrator agent when configured", async () => {
+    const mockCodexAgent: Agent = {
+      ...mockAgent,
+      name: "codex",
+      processName: "codex",
+      getLaunchCommand: vi.fn().mockReturnValue("codex --start"),
+      getEnvironment: vi.fn().mockReturnValue({ CODEX_VAR: "1" }),
+    };
+    const registryWithMultipleAgents: PluginRegistry = {
+      ...mockRegistry,
+      get: vi.fn().mockImplementation((slot: string, name: string) => {
+        if (slot === "runtime") return mockRuntime;
+        if (slot === "workspace") return mockWorkspace;
+        if (slot === "agent") {
+          if (name === "codex") return mockCodexAgent;
+          if (name === "mock-agent") return mockAgent;
+        }
+        return null;
+      }),
+    };
+    const configWithOrchestratorAgent: OrchestratorConfig = {
+      ...config,
+      projects: {
+        ...config.projects,
+        "my-app": {
+          ...config.projects["my-app"],
+          agent: "mock-agent",
+          orchestrator: {
+            agent: "codex",
+          },
+        },
+      },
+    };
+
+    const sm = createSessionManager({
+      config: configWithOrchestratorAgent,
+      registry: registryWithMultipleAgents,
+    });
+    await sm.spawnOrchestrator({ projectId: "my-app" });
+
+    expect(mockCodexAgent.getLaunchCommand).toHaveBeenCalled();
+    expect(mockAgent.getLaunchCommand).not.toHaveBeenCalled();
+    expect(readMetadataRaw(sessionsDir, "app-orchestrator")?.["agent"]).toBe("codex");
+  });
+
+  it("uses defaults orchestrator agent when project agent is not set", async () => {
+    const mockCodexAgent: Agent = {
+      ...mockAgent,
+      name: "codex",
+      processName: "codex",
+      getLaunchCommand: vi.fn().mockReturnValue("codex --start"),
+      getEnvironment: vi.fn().mockReturnValue({ CODEX_VAR: "1" }),
+    };
+    const registryWithMultipleAgents: PluginRegistry = {
+      ...mockRegistry,
+      get: vi.fn().mockImplementation((slot: string, name: string) => {
+        if (slot === "runtime") return mockRuntime;
+        if (slot === "workspace") return mockWorkspace;
+        if (slot === "agent") {
+          if (name === "codex") return mockCodexAgent;
+          if (name === "mock-agent") return mockAgent;
+        }
+        return null;
+      }),
+    };
+    const configWithDefaultOrchestratorAgent: OrchestratorConfig = {
+      ...config,
+      defaults: {
+        ...config.defaults,
+        orchestrator: {
+          agent: "codex",
+        },
+      },
+      projects: {
+        ...config.projects,
+        "my-app": {
+          ...config.projects["my-app"],
+          agent: undefined,
+        },
+      },
+    };
+
+    const sm = createSessionManager({
+      config: configWithDefaultOrchestratorAgent,
+      registry: registryWithMultipleAgents,
+    });
+    await sm.spawnOrchestrator({ projectId: "my-app" });
+
+    expect(mockCodexAgent.getLaunchCommand).toHaveBeenCalled();
+    expect(readMetadataRaw(sessionsDir, "app-orchestrator")?.["agent"]).toBe("codex");
+  });
+
+  it("keeps shared worker permissions when role-specific config only overrides model", async () => {
+    const configWithSharedPermissions: OrchestratorConfig = {
+      ...config,
+      projects: {
+        ...config.projects,
+        "my-app": {
+          ...config.projects["my-app"],
+          agentConfig: {
+            permissions: "suggest",
+          },
+          worker: {
+            agentConfig: {
+              model: "worker-model",
+            },
+          },
+        },
+      },
+    };
+
+    const validatedConfig = validateConfig(configWithSharedPermissions);
+    validatedConfig.configPath = config.configPath;
+    const sm = createSessionManager({
+      config: validatedConfig,
+      registry: mockRegistry,
+    });
+    await sm.spawn({ projectId: "my-app" });
+
+    expect(mockAgent.getLaunchCommand).toHaveBeenCalledWith(
+      expect.objectContaining({ permissions: "suggest", model: "worker-model" }),
+    );
+  });
+
+  it("uses role-specific orchestratorModel when configured", async () => {
+    const configWithRoleOrchestratorModel: OrchestratorConfig = {
+      ...config,
+      projects: {
+        ...config.projects,
+        "my-app": {
+          ...config.projects["my-app"],
+          agentConfig: {
+            model: "worker-model",
+            orchestratorModel: "shared-orchestrator-model",
+          },
+          orchestrator: {
+            agentConfig: {
+              orchestratorModel: "role-orchestrator-model",
+            },
+          },
+        },
+      },
+    };
+
+    const sm = createSessionManager({
+      config: configWithRoleOrchestratorModel,
+      registry: mockRegistry,
+    });
+    await sm.spawnOrchestrator({ projectId: "my-app" });
+
+    expect(mockAgent.getLaunchCommand).toHaveBeenCalledWith(
+      expect.objectContaining({ model: "role-orchestrator-model" }),
+    );
+  });
+
   it("forwards configured subagent to orchestrator launch", async () => {
     const configWithSubagent: OrchestratorConfig = {
       ...config,
@@ -3867,6 +4482,169 @@ describe("claimPR", () => {
       pr: "https://github.com/org/my-app/pull/42",
     });
     expect(raw!["prAutoDetect"]).toBeUndefined();
+  });
+
+  it("consolidates ownership by disabling PR auto-detect on the previous session", async () => {
+    const mockSCM = makeSCM();
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp/ws-app-1",
+      branch: "feat/existing-pr",
+      status: "review_pending",
+      project: "my-app",
+      pr: "https://github.com/org/my-app/pull/42",
+      runtimeHandle: JSON.stringify(makeHandle("rt-1")),
+    });
+
+    writeMetadata(sessionsDir, "app-2", {
+      worktree: "/tmp/ws-app-2",
+      branch: "feat/other-work",
+      status: "working",
+      project: "my-app",
+      runtimeHandle: JSON.stringify(makeHandle("rt-2")),
+    });
+
+    const sm = createSessionManager({ config, registry: registryWithSCM(mockSCM) });
+    const result = await sm.claimPR("app-2", "42");
+
+    expect(result.takenOverFrom).toEqual(["app-1"]);
+
+    const previous = readMetadataRaw(sessionsDir, "app-1");
+    expect(previous!["pr"]).toBeUndefined();
+    expect(previous!["prAutoDetect"]).toBe("off");
+    expect(previous!["status"]).toBe("working");
+  });
+
+  it("ignores legacy orchestrator metadata when claiming a PR", async () => {
+    const mockSCM = makeSCM();
+
+    writeMetadata(sessionsDir, "app-orchestrator", {
+      worktree: config.projects["my-app"]!.path,
+      branch: "feat/existing-pr",
+      status: "pr_open",
+      project: "my-app",
+      pr: "https://github.com/org/my-app/pull/42",
+      runtimeHandle: JSON.stringify(makeHandle("rt-orch")),
+    });
+
+    writeMetadata(sessionsDir, "app-2", {
+      worktree: "/tmp/ws-app-2",
+      branch: "feat/other-work",
+      status: "working",
+      project: "my-app",
+      runtimeHandle: JSON.stringify(makeHandle("rt-2")),
+    });
+
+    const sm = createSessionManager({ config, registry: registryWithSCM(mockSCM) });
+    const result = await sm.claimPR("app-2", "42");
+
+    expect(result.takenOverFrom).toEqual([]);
+    expect(readMetadataRaw(sessionsDir, "app-2")!["pr"]).toBe(
+      "https://github.com/org/my-app/pull/42",
+    );
+  });
+
+  it("repairs legacy orchestrator PR metadata and stale duplicate PR attachments on read", async () => {
+    writeMetadata(sessionsDir, "app-orchestrator", {
+      worktree: config.projects["my-app"]!.path,
+      branch: "main",
+      status: "merged",
+      project: "my-app",
+      pr: "https://github.com/org/my-app/pull/42",
+      runtimeHandle: JSON.stringify(makeHandle("rt-orch")),
+    });
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp/ws-app-1",
+      branch: "feat/existing-pr",
+      status: "review_pending",
+      project: "my-app",
+      pr: "https://github.com/org/my-app/pull/42",
+      runtimeHandle: JSON.stringify(makeHandle("rt-1")),
+    });
+
+    writeMetadata(sessionsDir, "app-2", {
+      worktree: "/tmp/ws-app-2",
+      branch: "feat/existing-pr",
+      status: "pr_open",
+      project: "my-app",
+      pr: "https://github.com/org/my-app/pull/42",
+      runtimeHandle: JSON.stringify(makeHandle("rt-2")),
+    });
+
+    const staleTime = new Date("2026-01-01T00:00:00.000Z");
+    const freshTime = new Date("2026-01-02T00:00:00.000Z");
+    utimesSync(join(sessionsDir, "app-1"), staleTime, staleTime);
+    utimesSync(join(sessionsDir, "app-2"), freshTime, freshTime);
+
+    const sm = createSessionManager({ config, registry: mockRegistry });
+    const sessions = await sm.list();
+
+    expect(sessions).toHaveLength(3);
+
+    const orchestrator = readMetadataRaw(sessionsDir, "app-orchestrator");
+    expect(orchestrator!["role"]).toBe("orchestrator");
+    expect(orchestrator!["pr"]).toBeUndefined();
+    expect(orchestrator!["prAutoDetect"]).toBe("off");
+    expect(orchestrator!["status"]).toBe("working");
+
+    const staleWorker = readMetadataRaw(sessionsDir, "app-1");
+    expect(staleWorker!["pr"]).toBeUndefined();
+    expect(staleWorker!["prAutoDetect"]).toBe("off");
+    expect(staleWorker!["status"]).toBe("working");
+
+    const activeWorker = readMetadataRaw(sessionsDir, "app-2");
+    expect(activeWorker!["pr"]).toBe("https://github.com/org/my-app/pull/42");
+    expect(activeWorker!["status"]).toBe("pr_open");
+  });
+
+  it("repairs stale duplicate PR attachments before claim conflict checks", async () => {
+    const mockSCM = makeSCM();
+
+    writeMetadata(sessionsDir, "app-1", {
+      worktree: "/tmp/ws-app-1",
+      branch: "feat/existing-pr",
+      status: "review_pending",
+      project: "my-app",
+      pr: "https://github.com/org/my-app/pull/42",
+      runtimeHandle: JSON.stringify(makeHandle("rt-1")),
+    });
+    writeMetadata(sessionsDir, "app-2", {
+      worktree: "/tmp/ws-app-2",
+      branch: "feat/existing-pr",
+      status: "pr_open",
+      project: "my-app",
+      pr: "https://github.com/org/my-app/pull/42",
+      runtimeHandle: JSON.stringify(makeHandle("rt-2")),
+    });
+    writeMetadata(sessionsDir, "app-3", {
+      worktree: "/tmp/ws-app-3",
+      branch: "feat/other-work",
+      status: "working",
+      project: "my-app",
+      runtimeHandle: JSON.stringify(makeHandle("rt-3")),
+    });
+
+    const staleTime = new Date("2026-01-01T00:00:00.000Z");
+    const freshTime = new Date("2026-01-02T00:00:00.000Z");
+    utimesSync(join(sessionsDir, "app-1"), staleTime, staleTime);
+    utimesSync(join(sessionsDir, "app-2"), freshTime, freshTime);
+
+    const sm = createSessionManager({ config, registry: registryWithSCM(mockSCM) });
+    const result = await sm.claimPR("app-3", "42");
+
+    expect(result.takenOverFrom).toEqual(["app-2"]);
+
+    const staleWorker = readMetadataRaw(sessionsDir, "app-1");
+    expect(staleWorker!["pr"]).toBeUndefined();
+    expect(staleWorker!["prAutoDetect"]).toBe("off");
+
+    const activeWorker = readMetadataRaw(sessionsDir, "app-2");
+    expect(activeWorker!["pr"]).toBeUndefined();
+    expect(activeWorker!["prAutoDetect"]).toBe("off");
+
+    const claimant = readMetadataRaw(sessionsDir, "app-3");
+    expect(claimant!["pr"]).toBe("https://github.com/org/my-app/pull/42");
   });
 
   it("automatically consolidates ownership when another session tracks the PR", async () => {

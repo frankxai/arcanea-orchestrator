@@ -11,7 +11,7 @@
  * Reference: scripts/claude-ao-session, scripts/send-to-session
  */
 
-import { statSync, existsSync, readdirSync, writeFileSync, mkdirSync } from "node:fs";
+import { statSync, existsSync, readdirSync, writeFileSync, mkdirSync, utimesSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { basename, join, resolve } from "node:path";
 import { homedir } from "node:os";
@@ -41,6 +41,7 @@ import {
   type PluginRegistry,
   type RuntimeHandle,
   type Issue,
+  isOrchestratorSession,
   PR_STATE,
 } from "./types.js";
 import {
@@ -72,6 +73,7 @@ import {
 } from "./global-pause.js";
 import { sessionFromMetadata } from "./utils/session-from-metadata.js";
 import { safeJsonParse } from "./utils/validation.js";
+import { resolveAgentSelection, resolveSessionRole } from "./agent-selection.js";
 
 const execFileAsync = promisify(execFile);
 const OPENCODE_DISCOVERY_TIMEOUT_MS = 2_000;
@@ -192,6 +194,14 @@ function getNextSessionNumber(existingSessions: string[], prefix: string): numbe
   return max + 1;
 }
 
+function getSessionNumber(sessionId: string, prefix: string): number | undefined {
+  const match = sessionId.match(new RegExp(`^${escapeRegex(prefix)}-(\\d+)$`));
+  if (!match) return undefined;
+
+  const parsed = Number.parseInt(match[1], 10);
+  return Number.isNaN(parsed) ? undefined : parsed;
+}
+
 const PR_TRACKING_STATUSES: ReadonlySet<string> = new Set([
   "pr_open",
   "ci_failed",
@@ -201,24 +211,47 @@ const PR_TRACKING_STATUSES: ReadonlySet<string> = new Set([
   "mergeable",
 ]);
 
+const STALE_PR_OWNERSHIP_STATUSES: ReadonlySet<string> = new Set([
+  ...PR_TRACKING_STATUSES,
+  "merged",
+]);
+
 const SEND_RESTORE_READY_TIMEOUT_MS = 5_000;
 const SEND_RESTORE_READY_POLL_MS = 500;
-const SEND_CONFIRMATION_ATTEMPTS = 3;
+const SEND_CONFIRMATION_ATTEMPTS = 6;
 const SEND_CONFIRMATION_POLL_MS = 500;
 const SEND_CONFIRMATION_OUTPUT_LINES = 20;
+const SEND_BOOTSTRAP_READY_TIMEOUT_MS = 20_000;
+const SEND_BOOTSTRAP_STABLE_POLLS = 2;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function getTmuxForegroundCommand(sessionName: string): Promise<string | null> {
+  try {
+    const { stdout } = await execFileAsync(
+      "tmux",
+      ["display-message", "-p", "-t", sessionName, "#{pane_current_command}"],
+      { timeout: 5_000 },
+    );
+    const command = stdout.trim();
+    return command.length > 0 ? command : null;
+  } catch {
+    return null;
+  }
 }
 
 /** Reconstruct a Session object from raw metadata key=value pairs. */
 function metadataToSession(
   sessionId: SessionId,
   meta: Record<string, string>,
+  projectId: string,
   createdAt?: Date,
   modifiedAt?: Date,
 ): Session {
   return sessionFromMetadata(sessionId, meta, {
+    projectId,
     createdAt,
     lastActivityAt: modifiedAt ?? new Date(),
   });
@@ -238,6 +271,12 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
     sessionsDir: string;
     project: ProjectConfig;
     projectId: string;
+  }
+
+  interface ActiveSessionRecord {
+    sessionName: string;
+    raw: Record<string, string>;
+    modifiedAt?: Date;
   }
 
   /**
@@ -305,43 +344,6 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
     return roots.some((root) => isPathInside(workspacePath, root));
   }
 
-  /**
-   * List all session files across all projects (or filtered by projectId).
-   * Scans project-specific directories under ~/.agent-orchestrator/{hash}-{projectId}/sessions/
-   *
-   * Note: projectId is the config key (e.g., "test-project"), not the path basename.
-   */
-  function listAllSessions(projectIdFilter?: string): { sessionName: string; projectId: string }[] {
-    const results: { sessionName: string; projectId: string }[] = [];
-
-    // Scan each project's sessions directory
-    for (const [projectKey, project] of Object.entries(config.projects)) {
-      // Use config key as projectId for consistency with metadata
-      const projectId = projectKey;
-
-      // Filter by project if specified
-      if (projectIdFilter && projectId !== projectIdFilter) continue;
-
-      const sessionsDir = getSessionsDir(config.configPath, project.path);
-      if (!existsSync(sessionsDir)) continue;
-
-      const files = readdirSync(sessionsDir);
-      for (const file of files) {
-        if (file === "archive" || file.startsWith(".")) continue;
-        const fullPath = join(sessionsDir, file);
-        try {
-          if (statSync(fullPath).isFile()) {
-            results.push({ sessionName: file, projectId });
-          }
-        } catch {
-          // Skip files that can't be stat'd
-        }
-      }
-    }
-
-    return results;
-  }
-
   function listArchivedSessionIds(sessionsDir: string): string[] {
     const archiveDir = join(sessionsDir, "archive");
     if (!existsSync(archiveDir)) return [];
@@ -351,6 +353,173 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
       if (match?.[1]) ids.add(match[1]);
     }
     return [...ids];
+  }
+
+  function isOrchestratorSessionRecord(
+    sessionId: string,
+    raw: Record<string, string> | null | undefined,
+  ): boolean {
+    if (!raw) return false;
+    return raw["role"] === "orchestrator" || sessionId.endsWith("-orchestrator");
+  }
+
+  function applyMetadataUpdatesToRaw(
+    raw: Record<string, string>,
+    updates: Partial<Record<string, string>>,
+  ): Record<string, string> {
+    let next = { ...raw };
+    for (const [key, value] of Object.entries(updates)) {
+      if (value === undefined) continue;
+      if (value === "") {
+        const { [key]: _removed, ...rest } = next;
+        void _removed;
+        next = rest;
+        continue;
+      }
+      next[key] = value;
+    }
+    return next;
+  }
+
+  function updateMetadataPreservingMtime(
+    sessionsDir: string,
+    sessionName: string,
+    updates: Partial<Record<string, string>>,
+    modifiedAt?: Date,
+  ): void {
+    const metaPath = join(sessionsDir, sessionName);
+    let preservedMtime = modifiedAt;
+    if (!preservedMtime) {
+      try {
+        preservedMtime = statSync(metaPath).mtime;
+      } catch {
+        preservedMtime = undefined;
+      }
+    }
+
+    updateMetadata(sessionsDir, sessionName, updates);
+
+    if (!preservedMtime) return;
+    try {
+      utimesSync(metaPath, preservedMtime, preservedMtime);
+    } catch {
+      void 0;
+    }
+  }
+
+  function repairSingleSessionMetadataOnRead(
+    sessionsDir: string,
+    record: ActiveSessionRecord,
+  ): ActiveSessionRecord {
+    const repaired = { ...record, raw: { ...record.raw } };
+    if (!isOrchestratorSessionRecord(repaired.sessionName, repaired.raw)) {
+      return repaired;
+    }
+
+    const updates: Partial<Record<string, string>> = {};
+    if (repaired.raw["role"] !== "orchestrator") {
+      updates["role"] = "orchestrator";
+    }
+    if (repaired.raw["pr"]) {
+      updates["pr"] = "";
+    }
+    if (repaired.raw["prAutoDetect"] !== "off") {
+      updates["prAutoDetect"] = "off";
+    }
+    if (STALE_PR_OWNERSHIP_STATUSES.has(repaired.raw["status"] ?? "")) {
+      updates["status"] = "working";
+    }
+
+    if (Object.keys(updates).length > 0) {
+      updateMetadataPreservingMtime(
+        sessionsDir,
+        repaired.sessionName,
+        updates,
+        repaired.modifiedAt,
+      );
+      repaired.raw = applyMetadataUpdatesToRaw(repaired.raw, updates);
+    }
+
+    return repaired;
+  }
+
+  function sessionMetadataTimestamp(record: ActiveSessionRecord): number {
+    const metadataTimestamp = Date.parse(record.raw["restoredAt"] ?? record.raw["createdAt"] ?? "");
+    if (record.modifiedAt) return record.modifiedAt.getTime();
+    return Number.isNaN(metadataTimestamp) ? 0 : metadataTimestamp;
+  }
+
+  function repairSessionMetadataOnRead(
+    sessionsDir: string,
+    records: ActiveSessionRecord[],
+  ): ActiveSessionRecord[] {
+    const repaired = records.map((record) => ({ ...record, raw: { ...record.raw } }));
+    const duplicatePRAttachments = new Map<string, ActiveSessionRecord[]>();
+
+    for (const record of repaired) {
+      if (isOrchestratorSessionRecord(record.sessionName, record.raw)) {
+        record.raw = repairSingleSessionMetadataOnRead(sessionsDir, record).raw;
+        continue;
+      }
+
+      const prUrl = record.raw["pr"];
+      if (!prUrl) continue;
+
+      const attached = duplicatePRAttachments.get(prUrl) ?? [];
+      attached.push(record);
+      duplicatePRAttachments.set(prUrl, attached);
+    }
+
+    for (const attachedRecords of duplicatePRAttachments.values()) {
+      if (attachedRecords.length < 2) continue;
+
+      const [owner, ...staleRecords] = [...attachedRecords].sort((a, b) => {
+        const trackingDiff =
+          Number(PR_TRACKING_STATUSES.has(b.raw["status"] ?? "")) -
+          Number(PR_TRACKING_STATUSES.has(a.raw["status"] ?? ""));
+        if (trackingDiff !== 0) return trackingDiff;
+
+        const timestampDiff = sessionMetadataTimestamp(b) - sessionMetadataTimestamp(a);
+        if (timestampDiff !== 0) return timestampDiff;
+
+        return b.sessionName.localeCompare(a.sessionName);
+      });
+
+      void owner;
+
+      for (const record of staleRecords) {
+        const updates: Partial<Record<string, string>> = {
+          pr: "",
+          prAutoDetect: "off",
+          ...(PR_TRACKING_STATUSES.has(record.raw["status"] ?? "") ? { status: "working" } : {}),
+        };
+        updateMetadataPreservingMtime(sessionsDir, record.sessionName, updates, record.modifiedAt);
+        record.raw = applyMetadataUpdatesToRaw(record.raw, updates);
+      }
+    }
+
+    return repaired;
+  }
+
+  function loadActiveSessionRecords(project: ProjectConfig): ActiveSessionRecord[] {
+    const sessionsDir = getProjectSessionsDir(project);
+    if (!existsSync(sessionsDir)) return [];
+
+    const records = listMetadata(sessionsDir).flatMap((sessionName) => {
+      const raw = readMetadataRaw(sessionsDir, sessionName);
+      if (!raw) return [];
+
+      let modifiedAt: Date | undefined;
+      try {
+        modifiedAt = statSync(join(sessionsDir, sessionName)).mtime;
+      } catch {
+        void 0;
+      }
+
+      return [{ sessionName, raw, modifiedAt } satisfies ActiveSessionRecord];
+    });
+
+    return repairSessionMetadataOnRead(sessionsDir, records);
   }
 
   function markArchivedOpenCodeCleanup(sessionsDir: string, sessionId: SessionId): void {
@@ -407,6 +576,10 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
       maybeAdd(id, readArchivedMetadataRaw(sessionsDir, id));
     }
 
+    if (criteria.sessionId) {
+      maybeAdd(criteria.sessionId, readArchivedMetadataRaw(sessionsDir, criteria.sessionId));
+    }
+
     return [...new Set(ids)];
   }
 
@@ -442,13 +615,85 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
     return candidateIds[0];
   }
 
-  /** Resolve which plugins to use for a project. */
-  function resolvePlugins(project: ProjectConfig, agentOverride?: string) {
-    const runtime = registry.get<Runtime>("runtime", project.runtime ?? config.defaults.runtime);
-    const agent = registry.get<Agent>(
-      "agent",
-      agentOverride ?? project.agent ?? config.defaults.agent,
+  async function listRemoteSessionNumbers(project: ProjectConfig): Promise<number[]> {
+    try {
+      const { stdout } = await execFileAsync(
+        "git",
+        ["ls-remote", "--heads", "origin", `session/${project.sessionPrefix}-*`],
+        {
+          cwd: project.path,
+          timeout: 5_000,
+        },
+      );
+
+      return stdout
+        .split("\n")
+        .flatMap((line: string) => {
+          const trimmed = line.trim();
+          if (!trimmed) return [];
+
+          const ref = trimmed.split(/\s+/)[1] ?? "";
+          const match = ref.match(
+            new RegExp(`refs/heads/session/${escapeRegex(project.sessionPrefix)}-(\\d+)$`),
+          );
+          if (!match) return [];
+
+          const parsed = Number.parseInt(match[1], 10);
+          return Number.isNaN(parsed) ? [] : [parsed];
+        })
+        .filter((num: number, index: number, values: number[]) => values.indexOf(num) === index);
+    } catch {
+      return [];
+    }
+  }
+
+  async function reserveNextSessionIdentity(
+    project: ProjectConfig,
+    sessionsDir: string,
+  ): Promise<{
+    num: number;
+    sessionId: string;
+    tmuxName: string | undefined;
+  }> {
+    const usedNumbers = new Set<number>();
+    for (const sessionName of [
+      ...listMetadata(sessionsDir),
+      ...listArchivedSessionIds(sessionsDir),
+    ]) {
+      const num = getSessionNumber(sessionName, project.sessionPrefix);
+      if (num !== undefined) usedNumbers.add(num);
+    }
+    for (const num of await listRemoteSessionNumbers(project)) {
+      usedNumbers.add(num);
+    }
+
+    let num = getNextSessionNumber(
+      [...usedNumbers].map((value) => `${project.sessionPrefix}-${value}`),
+      project.sessionPrefix,
     );
+    for (let attempts = 0; attempts < 10_000; attempts++) {
+      const sessionId = `${project.sessionPrefix}-${num}`;
+      const tmuxName = config.configPath
+        ? generateTmuxName(config.configPath, project.sessionPrefix, num)
+        : undefined;
+
+      if (!usedNumbers.has(num) && reserveSessionId(sessionsDir, sessionId)) {
+        return { num, sessionId, tmuxName };
+      }
+
+      usedNumbers.add(num);
+      num += 1;
+    }
+
+    throw new Error(
+      `Failed to reserve session ID after 10000 attempts (prefix: ${project.sessionPrefix})`,
+    );
+  }
+
+  /** Resolve which plugins to use for a project. */
+  function resolvePlugins(project: ProjectConfig, agentName?: string) {
+    const runtime = registry.get<Runtime>("runtime", project.runtime ?? config.defaults.runtime);
+    const agent = registry.get<Agent>("agent", agentName ?? project.agent ?? config.defaults.agent);
     const workspace = registry.get<Workspace>(
       "workspace",
       project.workspace ?? config.defaults.workspace,
@@ -459,6 +704,19 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
     const scm = project.scm ? registry.get<SCM>("scm", project.scm.plugin) : null;
 
     return { runtime, agent, workspace, tracker, scm };
+  }
+
+  function resolveSelectionForSession(
+    project: ProjectConfig,
+    sessionId: string,
+    metadata: Record<string, string>,
+  ) {
+    return resolveAgentSelection({
+      role: resolveSessionRole(sessionId, metadata),
+      project,
+      defaults: config.defaults,
+      persistedAgent: metadata["agent"],
+    });
   }
 
   async function ensureOpenCodeSessionMapping(
@@ -487,7 +745,21 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
       const sessionsDir = getProjectSessionsDir(project);
       const raw = readMetadataRaw(sessionsDir, sessionId);
       if (!raw) continue;
-      return { raw, sessionsDir, project, projectId };
+
+      let modifiedAt: Date | undefined;
+      try {
+        modifiedAt = statSync(join(sessionsDir, sessionId)).mtime;
+      } catch {
+        modifiedAt = undefined;
+      }
+
+      const repaired = repairSingleSessionMetadataOnRead(sessionsDir, {
+        sessionName: sessionId,
+        raw,
+        modifiedAt,
+      });
+
+      return { raw: repaired.raw, sessionsDir, project, projectId };
     }
 
     return null;
@@ -522,10 +794,19 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
       sessionListPromise,
     );
 
-    const handleFromMetadata = session.runtimeHandle !== null;
+    const tmuxNameFromMetadata = session.metadata["tmuxName"]?.trim();
+    const hasTmuxNameFromMetadata =
+      typeof tmuxNameFromMetadata === "string" && tmuxNameFromMetadata.length > 0;
+    const handleFromMetadata = session.runtimeHandle !== null || hasTmuxNameFromMetadata;
     if (!handleFromMetadata) {
       session.runtimeHandle = {
         id: sessionName,
+        runtimeName: project.runtime ?? config.defaults.runtime,
+        data: {},
+      };
+    } else if (!session.runtimeHandle && hasTmuxNameFromMetadata) {
+      session.runtimeHandle = {
+        id: tmuxNameFromMetadata,
         runtimeName: project.runtime ?? config.defaults.runtime,
         data: {},
       };
@@ -610,22 +891,19 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
       );
     }
 
-    const plugins = resolvePlugins(project);
+    const selection = resolveAgentSelection({
+      role: "worker",
+      project,
+      defaults: config.defaults,
+      spawnAgentOverride: spawnConfig.agent,
+    });
+    const plugins = resolvePlugins(project, selection.agentName);
     if (!plugins.runtime) {
       throw new Error(`Runtime plugin '${project.runtime ?? config.defaults.runtime}' not found`);
     }
 
-    // Allow --agent override to swap the agent plugin for this session
-    if (spawnConfig.agent) {
-      const overrideAgent = registry.get<Agent>("agent", spawnConfig.agent);
-      if (!overrideAgent) {
-        throw new Error(`Agent plugin '${spawnConfig.agent}' not found`);
-      }
-      plugins.agent = overrideAgent;
-    }
-
     if (!plugins.agent) {
-      throw new Error(`Agent plugin '${project.agent ?? config.defaults.agent}' not found`);
+      throw new Error(`Agent plugin '${selection.agentName}' not found`);
     }
 
     // Validate issue exists BEFORE creating any resources
@@ -655,29 +933,7 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
     }
 
     // Determine session ID — atomically reserve to prevent concurrent collisions
-    const existingSessions = listMetadata(sessionsDir);
-    let num = getNextSessionNumber(existingSessions, project.sessionPrefix);
-    let sessionId: string;
-    let tmuxName: string | undefined;
-    for (let attempts = 0; attempts < 10; attempts++) {
-      sessionId = `${project.sessionPrefix}-${num}`;
-      // Generate tmux name if using new architecture
-      if (config.configPath) {
-        tmuxName = generateTmuxName(config.configPath, project.sessionPrefix, num);
-      }
-      if (reserveSessionId(sessionsDir, sessionId)) break;
-      num++;
-      if (attempts === 9) {
-        throw new Error(
-          `Failed to reserve session ID after 10 attempts (prefix: ${project.sessionPrefix})`,
-        );
-      }
-    }
-    // Reassign to satisfy TypeScript's flow analysis (not redundant from compiler's perspective)
-    sessionId = `${project.sessionPrefix}-${num}`;
-    if (config.configPath) {
-      tmuxName = generateTmuxName(config.configPath, project.sessionPrefix, num);
-    }
+    const { sessionId, tmuxName } = await reserveNextSessionIdentity(project, sessionsDir);
 
     // Determine branch name — explicit branch always takes priority
     let branch: string;
@@ -771,25 +1027,20 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
             strategy: opencodeIssueSessionStrategy,
           })
         : undefined;
-    const configuredSubagent =
-      typeof project.agentConfig?.["subagent"] === "string"
-        ? project.agentConfig["subagent"]
-        : undefined;
-
     const agentLaunchConfig = {
       sessionId,
       projectConfig: {
         ...project,
         agentConfig: {
-          ...(project.agentConfig ?? {}),
+          ...selection.agentConfig,
           ...(reusedOpenCodeSessionId ? { opencodeSessionId: reusedOpenCodeSessionId } : {}),
         },
       },
       issueId: spawnConfig.issueId,
       prompt: composedPrompt,
-      permissions: project.agentConfig?.permissions,
-      model: project.agentConfig?.model,
-      subagent: spawnConfig.subagent ?? configuredSubagent,
+      permissions: selection.permissions,
+      model: selection.model,
+      subagent: spawnConfig.subagent ?? selection.subagent,
     };
 
     let handle: RuntimeHandle;
@@ -856,7 +1107,7 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
         tmuxName, // Store tmux name for mapping
         issue: spawnConfig.issueId,
         project: spawnConfig.projectId,
-        agent: plugins.agent.name, // Persist agent name for lifecycle manager
+        agent: selection.agentName, // Persist agent name for lifecycle manager
         createdAt: new Date().toISOString(),
         runtimeHandle: JSON.stringify(handle),
         opencodeSessionId: reusedOpenCodeSessionId,
@@ -939,12 +1190,17 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
       );
     }
 
-    const plugins = resolvePlugins(project);
+    const selection = resolveAgentSelection({
+      role: "orchestrator",
+      project,
+      defaults: config.defaults,
+    });
+    const plugins = resolvePlugins(project, selection.agentName);
     if (!plugins.runtime) {
       throw new Error(`Runtime plugin '${project.runtime ?? config.defaults.runtime}' not found`);
     }
     if (!plugins.agent) {
-      throw new Error(`Agent plugin '${project.agent ?? config.defaults.agent}' not found`);
+      throw new Error(`Agent plugin '${selection.agentName}' not found`);
     }
 
     const sessionId = `${project.sessionPrefix}-orchestrator`;
@@ -985,7 +1241,7 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
 
     const existingRaw = readMetadataRaw(sessionsDir, sessionId);
     const existingOrchestrator = existingRaw?.["runtimeHandle"]
-      ? metadataToSession(sessionId, existingRaw)
+      ? metadataToSession(sessionId, existingRaw, orchestratorConfig.projectId)
       : null;
     if (existingOrchestrator?.runtimeHandle) {
       const existingAlive = await plugins.runtime
@@ -994,7 +1250,11 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
       if (existingAlive && orchestratorSessionStrategy === "reuse") {
         const persistedRaw = readMetadataRaw(sessionsDir, sessionId);
         if (persistedRaw?.["runtimeHandle"]) {
-          const persisted = metadataToSession(sessionId, persistedRaw);
+          const persisted = metadataToSession(
+            sessionId,
+            persistedRaw,
+            orchestratorConfig.projectId,
+          );
           persisted.metadata["orchestratorSessionReused"] = "true";
           return persisted;
         }
@@ -1023,7 +1283,7 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
       // Check if the session now exists and is alive.
       const concurrentRaw = readMetadataRaw(sessionsDir, sessionId);
       const concurrentSession = concurrentRaw?.["runtimeHandle"]
-        ? metadataToSession(sessionId, concurrentRaw)
+        ? metadataToSession(sessionId, concurrentRaw, orchestratorConfig.projectId)
         : null;
       if (concurrentSession?.runtimeHandle) {
         const concurrentAlive = await plugins.runtime
@@ -1053,11 +1313,6 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
             strategy: "reuse",
           })
         : undefined;
-    const configuredSubagent =
-      typeof project.agentConfig?.["subagent"] === "string"
-        ? project.agentConfig["subagent"]
-        : undefined;
-
     if (plugins.agent.name === "opencode" && orchestratorSessionStrategy === "delete") {
       await resolveOpenCodeSessionReuse({
         sessionsDir,
@@ -1074,14 +1329,15 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
       projectConfig: {
         ...project,
         agentConfig: {
-          ...(project.agentConfig ?? {}),
+          ...selection.agentConfig,
+          permissions: "permissionless" as const,
           ...(reusableOpenCodeSessionId ? { opencodeSessionId: reusableOpenCodeSessionId } : {}),
         },
       },
       permissions: "permissionless" as const,
-      model: project.agentConfig?.orchestratorModel ?? project.agentConfig?.model,
+      model: selection.model,
       systemPromptFile,
-      subagent: configuredSubagent,
+      subagent: selection.subagent,
     };
 
     const launchCommand = plugins.agent.getLaunchCommand(agentLaunchConfig);
@@ -1127,7 +1383,7 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
         role: "orchestrator",
         tmuxName,
         project: orchestratorConfig.projectId,
-        agent: plugins.agent.name,
+        agent: selection.agentName,
         createdAt: new Date().toISOString(),
         runtimeHandle: JSON.stringify(handle),
         opencodeSessionId: reusableOpenCodeSessionId,
@@ -1173,16 +1429,21 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
   }
 
   async function list(projectId?: string): Promise<Session[]> {
-    const allSessions = listAllSessions(projectId);
+    const allSessions = Object.entries(config.projects).flatMap(([entryProjectId, project]) => {
+      if (projectId && entryProjectId !== projectId) return [];
+      return loadActiveSessionRecords(project).map((record) => ({
+        sessionName: record.sessionName,
+        projectId: entryProjectId,
+        raw: record.raw,
+      }));
+    });
     let openCodeSessionListPromise: Promise<OpenCodeSessionListEntry[]> | undefined;
 
-    const tasks = allSessions.map(async ({ sessionName, projectId: sessionProjectId }) => {
+    const tasks = allSessions.map(async ({ sessionName, projectId: sessionProjectId, raw }) => {
       const project = config.projects[sessionProjectId];
       if (!project) return null;
 
       const sessionsDir = getProjectSessionsDir(project);
-      const raw = readMetadataRaw(sessionsDir, sessionName);
-      if (!raw) return null;
 
       let createdAt: Date | undefined;
       let modifiedAt: Date | undefined;
@@ -1195,9 +1456,9 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
         // If stat fails, timestamps will fall back to current time
       }
 
-      const session = metadataToSession(sessionName, raw, createdAt, modifiedAt);
-      const selectedAgentName = raw["agent"];
-      const effectiveAgentName = selectedAgentName ?? project.agent ?? config.defaults.agent;
+      const session = metadataToSession(sessionName, raw, sessionProjectId, createdAt, modifiedAt);
+      const selection = resolveSelectionForSession(project, sessionName, raw);
+      const effectiveAgentName = selection.agentName;
       const plugins = resolvePlugins(project, effectiveAgentName);
       const sessionListPromise =
         effectiveAgentName === "opencode"
@@ -1234,7 +1495,7 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
 
   async function get(sessionId: SessionId): Promise<Session | null> {
     // Try to find the session in any project's sessions directory
-    for (const project of Object.values(config.projects)) {
+    for (const [projectId, project] of Object.entries(config.projects)) {
       const sessionsDir = getProjectSessionsDir(project);
       const raw = readMetadataRaw(sessionsDir, sessionId);
       if (!raw) continue;
@@ -1251,10 +1512,16 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
         // If stat fails, timestamps will fall back to current time
       }
 
-      const session = metadataToSession(sessionId, raw, createdAt, modifiedAt);
+      const repaired = repairSingleSessionMetadataOnRead(sessionsDir, {
+        sessionName: sessionId,
+        raw,
+        modifiedAt,
+      });
 
-      const selectedAgentName = raw["agent"];
-      const effectiveAgentName = selectedAgentName ?? project.agent ?? config.defaults.agent;
+      const session = metadataToSession(sessionId, repaired.raw, projectId, createdAt, modifiedAt);
+
+      const selection = resolveSelectionForSession(project, sessionId, repaired.raw);
+      const effectiveAgentName = selection.agentName;
       const plugins = resolvePlugins(project, effectiveAgentName);
       await ensureHandleAndEnrich(
         session,
@@ -1274,7 +1541,7 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
   async function kill(sessionId: SessionId, options?: { purgeOpenCode?: boolean }): Promise<void> {
     const { raw, sessionsDir, project, projectId } = requireSessionRecord(sessionId);
 
-    const cleanupAgent = raw["agent"] ?? project?.agent ?? config.defaults.agent;
+    const cleanupAgent = resolveSelectionForSession(project, sessionId, raw).agentName;
 
     // Destroy runtime — prefer handle.runtimeName to find the correct plugin
     if (raw["runtimeHandle"]) {
@@ -1379,7 +1646,7 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
         // Never clean up orchestrator sessions — they manage the lifecycle.
         // Check explicit role metadata first, fall back to naming convention
         // for pre-existing sessions spawned before the role field was added.
-        if (session.metadata["role"] === "orchestrator" || session.id.endsWith("-orchestrator")) {
+        if (isOrchestratorSession(session)) {
           pushSkipped(session.projectId, session.id);
           continue;
         }
@@ -1451,12 +1718,12 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
         const archived = readArchivedMetadataRaw(sessionsDir, archivedId);
         if (!archived) continue;
 
-        if (archived["role"] === "orchestrator" || archivedId.endsWith("-orchestrator")) {
+        if (isOrchestratorSession({ id: archivedId, metadata: archived })) {
           pushSkipped(projectKey, archivedId);
           continue;
         }
 
-        const cleanupAgent = archived["agent"] ?? project.agent ?? config.defaults.agent;
+        const cleanupAgent = resolveSelectionForSession(project, archivedId, archived).agentName;
         const mappedOpenCodeSessionId = asValidOpenCodeSessionId(archived["opencodeSessionId"]);
         if (cleanupAgent === "opencode" && archived["opencodeCleanedAt"]) {
           pushSkipped(projectKey, archivedId);
@@ -1510,7 +1777,8 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
       );
     }
 
-    const selectedAgent = raw["agent"] ?? project.agent ?? config.defaults.agent;
+    const selection = resolveSelectionForSession(project, sessionId, raw);
+    const selectedAgent = selection.agentName;
     if (selectedAgent === "opencode" && !asValidOpenCodeSessionId(raw["opencodeSessionId"])) {
       const discovered = await discoverOpenCodeSessionIdByTitle(
         sessionId,
@@ -1525,7 +1793,7 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
       ? safeJsonParse<RuntimeHandle>(raw["runtimeHandle"])
       : null;
     const runtimeName = parsedHandle?.runtimeName ?? project.runtime ?? config.defaults.runtime;
-    const agentName = raw["agent"] ?? project.agent ?? config.defaults.agent;
+    const agentName = selectedAgent;
 
     const runtimePlugin = registry.get<Runtime>("runtime", runtimeName);
     if (!runtimePlugin) {
@@ -1558,6 +1826,69 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
       return output.includes("Press up to edit queued messages");
     };
 
+    const getOpenCodeSessionUpdatedAt = async (): Promise<number | undefined> => {
+      const mappedSessionId = asValidOpenCodeSessionId(raw["opencodeSessionId"]);
+      if (agentName !== "opencode" || !mappedSessionId) {
+        return undefined;
+      }
+
+      const sessions = await fetchOpenCodeSessionList(OPENCODE_DISCOVERY_TIMEOUT_MS);
+      return sessions.find((entry) => entry.id === mappedSessionId)?.updatedAt;
+    };
+
+    const waitForInteractiveReadiness = async (
+      session: Session,
+      timeoutMs: number,
+    ): Promise<void> => {
+      const handle = session.runtimeHandle;
+      if (!handle) {
+        return;
+      }
+
+      const deadline = Date.now() + timeoutMs;
+      let lastSettledOutput: string | null = null;
+      let stablePolls = 0;
+
+      while (true) {
+        const [runtimeAlive, processRunning, output, foregroundCommand] = await Promise.all([
+          runtimePlugin.isAlive(handle).catch(() => true),
+          agentPlugin.isProcessRunning(handle).catch(() => true),
+          captureOutput(handle),
+          handle.runtimeName === "tmux"
+            ? getTmuxForegroundCommand(handle.id)
+            : Promise.resolve(agentPlugin.processName),
+        ]);
+
+        const outputReady = output.trim().length > 0;
+        const foregroundReady =
+          foregroundCommand === null || foregroundCommand === agentPlugin.processName;
+        const settledOutput = outputReady ? output.trimEnd() : null;
+        const isStable = settledOutput !== null && settledOutput === lastSettledOutput;
+
+        if (
+          runtimeAlive &&
+          processRunning &&
+          foregroundReady &&
+          (hasQueuedMessage(output) || isStable)
+        ) {
+          stablePolls += 1;
+          if (stablePolls >= SEND_BOOTSTRAP_STABLE_POLLS) {
+            return;
+          }
+        } else {
+          stablePolls = 0;
+        }
+
+        lastSettledOutput = settledOutput;
+
+        if (Date.now() >= deadline) {
+          return;
+        }
+
+        await sleep(SEND_RESTORE_READY_POLL_MS);
+      }
+    };
+
     const waitForRestoredSession = async (restoredSession: Session): Promise<void> => {
       const handle = restoredSession.runtimeHandle;
       if (!handle) {
@@ -1566,13 +1897,19 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
 
       const deadline = Date.now() + SEND_RESTORE_READY_TIMEOUT_MS;
       while (true) {
-        const [runtimeAlive, processRunning, output] = await Promise.all([
+        const [runtimeAlive, processRunning, output, foregroundCommand] = await Promise.all([
           runtimePlugin.isAlive(handle).catch(() => true),
           agentPlugin.isProcessRunning(handle).catch(() => true),
           captureOutput(handle),
+          handle.runtimeName === "tmux"
+            ? getTmuxForegroundCommand(handle.id)
+            : Promise.resolve(agentPlugin.processName),
         ]);
 
-        if (runtimeAlive && (processRunning || output.trim().length > 0)) {
+        const foregroundReady =
+          foregroundCommand === null || foregroundCommand === agentPlugin.processName;
+
+        if (runtimeAlive && foregroundReady && (processRunning || output.trim().length > 0)) {
           return;
         }
 
@@ -1625,10 +1962,18 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
         );
       }
 
-      const [runtimeAlive, processRunning] = await Promise.all([
+      let [runtimeAlive, processRunning] = await Promise.all([
         runtimePlugin.isAlive(handle).catch(() => true),
         agentPlugin.isProcessRunning(handle).catch(() => true),
       ]);
+
+      if (normalized.status === "spawning" && runtimeAlive) {
+        await waitForInteractiveReadiness(normalized, SEND_BOOTSTRAP_READY_TIMEOUT_MS);
+        [runtimeAlive, processRunning] = await Promise.all([
+          runtimePlugin.isAlive(handle).catch(() => true),
+          agentPlugin.isProcessRunning(handle).catch(() => true),
+        ]);
+      }
 
       if (!runtimeAlive || !processRunning) {
         return restoreForDelivery(
@@ -1648,6 +1993,7 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
 
       const baselineOutput = await captureOutput(handle);
       const baselineActivity = detectActivityFromOutput(baselineOutput) ?? session.activity;
+      const baselineUpdatedAt = await getOpenCodeSessionUpdatedAt();
 
       await runtimePlugin.sendMessage(handle, message);
 
@@ -1658,7 +2004,11 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
 
         const output = await captureOutput(handle);
         const activity = detectActivityFromOutput(output) ?? session.activity;
+        const updatedAt = await getOpenCodeSessionUpdatedAt();
         const delivered =
+          (baselineUpdatedAt !== undefined &&
+            updatedAt !== undefined &&
+            updatedAt > baselineUpdatedAt) ||
           hasQueuedMessage(output) ||
           (output.length > 0 && output !== baselineOutput) ||
           (baselineActivity !== "active" && activity === "active") ||
@@ -1713,11 +2063,14 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
     if (!reference) throw new Error("PR reference is required");
 
     const { raw, sessionsDir, project, projectId } = requireSessionRecord(sessionId);
-    if (raw["role"] === "orchestrator") {
+    if (isOrchestratorSessionRecord(sessionId, raw)) {
       throw new Error(`Session ${sessionId} is an orchestrator session and cannot claim PRs`);
     }
 
-    const plugins = resolvePlugins(project, raw["agent"]);
+    const plugins = resolvePlugins(
+      project,
+      resolveSelectionForSession(project, sessionId, raw).agentName,
+    );
     const scm = plugins.scm;
     if (!scm?.resolvePR || !scm.checkoutPR) {
       throw new Error(
@@ -1732,11 +2085,12 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
     }
 
     const conflictingSessions = new Set<SessionId>();
-    for (const { sessionName } of listAllSessions(projectId)) {
-      if (sessionName === sessionId) continue;
+    const activeRecords = loadActiveSessionRecords(project).filter(
+      (record) => record.sessionName !== sessionId,
+    );
 
-      const otherRaw = readMetadataRaw(sessionsDir, sessionName);
-      if (!otherRaw || otherRaw["role"] === "orchestrator") continue;
+    for (const { sessionName, raw: otherRaw } of activeRecords) {
+      if (!otherRaw || isOrchestratorSessionRecord(sessionName, otherRaw)) continue;
 
       const samePr = otherRaw["pr"] === pr.url;
       const sameBranch =
@@ -1803,7 +2157,8 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
   async function remap(sessionId: SessionId, force = false): Promise<string> {
     const { raw, sessionsDir, project } = requireSessionRecord(sessionId);
 
-    const selectedAgent = raw["agent"] ?? project.agent ?? config.defaults.agent;
+    const selection = resolveSelectionForSession(project, sessionId, raw);
+    const selectedAgent = selection.agentName;
     if (selectedAgent !== "opencode") {
       throw new Error(`Session ${sessionId} is not using the opencode agent`);
     }
@@ -1860,7 +2215,8 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
       throw new SessionNotFoundError(sessionId);
     }
 
-    const selectedAgent = raw["agent"] ?? project.agent ?? config.defaults.agent;
+    const selection = resolveSelectionForSession(project, sessionId, raw);
+    const selectedAgent = selection.agentName;
     if (selectedAgent === "opencode" && !asValidOpenCodeSessionId(raw["opencodeSessionId"])) {
       const discovered = await discoverOpenCodeSessionIdByTitle(
         sessionId,
@@ -1879,8 +2235,8 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
     //    metadataToSession sets activity: null, so without enrichment a crashed
     //    session (status "working", agent exited) would not be detected as terminal
     //    and isRestorable would reject it.
-    const session = metadataToSession(sessionId, raw);
-    const plugins = resolvePlugins(project, raw["agent"]);
+    const session = metadataToSession(sessionId, raw, projectId);
+    const plugins = resolvePlugins(project, selection.agentName);
     await enrichSessionWithRuntimeState(session, plugins, true);
 
     // 3. Validate restorability
@@ -1916,7 +2272,7 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
       throw new Error(`Runtime plugin '${project.runtime ?? config.defaults.runtime}' not found`);
     }
     if (!plugins.agent) {
-      throw new Error(`Agent plugin '${project.agent ?? config.defaults.agent}' not found`);
+      throw new Error(`Agent plugin '${selection.agentName}' not found`);
     }
 
     // 5. Check workspace
@@ -1967,28 +2323,22 @@ export function createSessionManager(deps: SessionManagerDeps): OpenCodeSessionM
 
     // 7. Get launch command — try restore command first, fall back to fresh launch
     let launchCommand: string;
-    const configuredSubagent =
-      typeof project.agentConfig?.["subagent"] === "string"
-        ? project.agentConfig["subagent"]
-        : undefined;
     const agentLaunchConfig = {
       sessionId,
       projectConfig: {
         ...project,
         agentConfig: {
-          ...(project.agentConfig ?? {}),
+          ...selection.agentConfig,
+          ...(selection.role === "orchestrator" ? { permissions: "permissionless" as const } : {}),
           ...(session.metadata?.opencodeSessionId
             ? { opencodeSessionId: session.metadata.opencodeSessionId }
             : {}),
         },
       },
       issueId: session.issueId ?? undefined,
-      permissions: project.agentConfig?.permissions,
-      model:
-        raw["role"] === "orchestrator"
-          ? (project.agentConfig?.orchestratorModel ?? project.agentConfig?.model)
-          : project.agentConfig?.model,
-      subagent: configuredSubagent,
+      permissions: selection.role === "orchestrator" ? "permissionless" : selection.permissions,
+      model: selection.model,
+      subagent: selection.subagent,
     };
 
     if (plugins.agent.getRestoreCommand) {

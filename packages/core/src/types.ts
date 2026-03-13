@@ -172,6 +172,13 @@ export interface Session {
   metadata: Record<string, string>;
 }
 
+export function isOrchestratorSession(session: {
+  id: SessionId;
+  metadata?: Record<string, string>;
+}): boolean {
+  return session.metadata?.["role"] === "orchestrator" || session.id.endsWith("-orchestrator");
+}
+
 /** Config for creating a new session */
 export interface SessionSpawnConfig {
   projectId: string;
@@ -912,6 +919,17 @@ export interface DefaultPlugins {
   agent: string;
   workspace: string;
   notifiers: string[];
+  orchestrator?: {
+    agent?: string;
+  };
+  worker?: {
+    agent?: string;
+  };
+}
+
+export interface RoleAgentConfig {
+  agent?: string;
+  agentConfig?: AgentSpecificConfig;
 }
 
 export interface ProjectConfig {
@@ -953,6 +971,10 @@ export interface ProjectConfig {
 
   /** Agent-specific configuration */
   agentConfig?: AgentSpecificConfig;
+
+  orchestrator?: RoleAgentConfig;
+
+  worker?: RoleAgentConfig;
 
   /** Per-project reaction overrides */
   reactions?: Record<string, Partial<ReactionConfig>>;
@@ -1160,6 +1182,7 @@ export interface OpenCodeSessionManager extends SessionManager {
 
 export interface ClaimPROptions {
   assignOnGithub?: boolean;
+  takeover?: boolean;
 }
 
 export interface ClaimPRResult {

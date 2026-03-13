@@ -388,9 +388,31 @@ To add a custom tracker (Jira, Asana, etc.), create a plugin:
 2. Implement the `Tracker` interface from `@composio/ao-core`
 3. Register your plugin in the config
 
-See [CLAUDE.md](./CLAUDE.md) for plugin development guidelines.
+See [Development Guide](./docs/DEVELOPMENT.md) for plugin development guidelines.
 
 ## Troubleshooting
+
+### Run `ao doctor`
+
+Use the built-in doctor before debugging a broken install by hand:
+
+```bash
+ao doctor
+ao doctor --fix
+```
+
+`ao doctor` reports deterministic PASS/WARN/FAIL checks for PATH and launcher resolution, required binaries, tmux and GitHub CLI health, stale AO temp files, config support directories, and core build/runtime sanity. `--fix` only applies safe fixes such as creating missing AO support directories, refreshing the local launcher link, and removing stale AO temp files.
+
+### Run `ao update`
+
+When you installed AO from this repository and want to refresh that local install:
+
+```bash
+git switch main
+ao update
+```
+
+`ao update` is intentionally conservative: it requires a clean working tree on `main`, fast-forwards from `origin/main`, reinstalls dependencies, clean-rebuilds the critical core/CLI/web packages, refreshes the launcher with `npm link`, and runs CLI smoke tests. Use `ao update --skip-smoke` to stop after rebuild, or `ao update --smoke-only` to rerun just the smoke checks.
 
 ### "No agent-orchestrator.yaml found"
 
@@ -615,7 +637,7 @@ Create custom plugins for:
 - Different trackers (Jira, Asana, custom systems)
 - Different notifiers (email, webhooks, custom integrations)
 
-See [CLAUDE.md](./CLAUDE.md) for plugin development guidelines.
+See [Development Guide](./docs/DEVELOPMENT.md) for plugin development guidelines.
 
 ### Docker Runtime
 
@@ -814,7 +836,7 @@ Useful for:
 1. **Run `ao init`** - Create your first config
 2. **Spawn an agent** - `ao spawn my-app ISSUE-123`
 3. **Monitor progress** - `ao status` or dashboard
-4. **Read [CLAUDE.md](./CLAUDE.md)** - Code conventions and architecture
+4. **Read [Development Guide](./docs/DEVELOPMENT.md)** - Code conventions and architecture
 5. **Explore examples** - See [examples/](./examples/) for more configs
 6. **Join the community** - Report issues, share configs, contribute plugins
 
