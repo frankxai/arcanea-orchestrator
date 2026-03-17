@@ -27,11 +27,11 @@ let ptySpawn: unknown = null;
 
 // Non-null check to ensure ptySpawn is available before use
 // Returns the spawn function, throws if not available
-function ensurePtySpawn(): typeof import("node-pty").spawn {
+function ensurePtySpawn(): SpawnFunction {
   if (!ptySpawn) {
     throw new Error("[DirectTerminal] ptySpawn not available - node-pty failed to load");
   }
-  return ptySpawn as typeof import("node-pty").spawn;
+  return ptySpawn as SpawnFunction;
 }
 
 // Interface for PTY instance returned by node-pty.spawn
