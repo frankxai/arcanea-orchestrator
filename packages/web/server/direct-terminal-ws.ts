@@ -5,20 +5,60 @@
  * This bypasses ttyd and gives us control over terminal initialization,
  * allowing us to implement the XDA (Extended Device Attributes) handler
  * that tmux requires for clipboard support.
+ *
+ * Note: This module gracefully handles missing node-pty binary (e.g., on linux-arm64
+ * without build tools). The server will exit cleanly to allow concurrently to
+ * continue running the dashboard, and users can fall back to the ttyd terminal
+ * on port 14800.
  */
 
 import { createServer, type Server } from "node:http";
 import { spawn } from "node:child_process";
 import { WebSocketServer, WebSocket } from "ws";
-import { spawn as ptySpawn, type IPty } from "node-pty";
 import { homedir, userInfo } from "node:os";
 import { createCorrelationId } from "@composio/ao-core";
 import { findTmux, resolveTmuxSession, validateSessionId } from "./tmux-utils.js";
 import { createObserverContext, inferProjectId } from "./terminal-observability.js";
 
+// Dynamically import node-pty with graceful fallback for missing prebuilt binaries
+// This allows the dashboard to start on platforms where node-pty doesn't have
+// prebuilt binaries (e.g., linux-arm64 without build tools)
+let ptySpawn: typeof import("node-pty").spawn | null = null;
+
+// Type for PTY instance (defined here to avoid top-level await type issues)
+interface IPty {
+  onData(data: string): void;
+  onExit(callback: (event: { exitCode: number; signal?: number }) => void): void;
+  write(data: string): void;
+  resize(cols: number, rows: number): void;
+  kill(): void;
+}
+
+try {
+  const pty = await import("node-pty");
+  ptySpawn = pty.spawn;
+} catch (err) {
+  console.error(
+    "[DirectTerminal] Failed to load node-pty:",
+    err instanceof Error ? err.message : String(err),
+  );
+  console.error(
+    "[DirectTerminal] This is expected on linux-arm64 without build tools installed.",
+  );
+  console.error("[DirectTerminal] Falling back to ttyd terminal on port 14800.");
+  console.error(
+    "[DirectTerminal] To enable direct-terminal, install build tools:",
+  );
+  console.error(
+    "[DirectTerminal]   sudo apt-get install build-essential && pnpm install",
+  );
+  // Exit cleanly (code 0) so concurrently doesn't kill the dashboard
+  process.exit(0);
+}
+
 interface TerminalSession {
   sessionId: string;
-  pty: IPty;
+  pty: IPty | null;
   ws: WebSocket;
 }
 
