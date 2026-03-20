@@ -89,12 +89,12 @@ describe("ProjectSidebar", () => {
     expect(mockPush).toHaveBeenCalledWith("/?project=other-project");
   });
 
-  it("renders All Projects button that navigates to /", () => {
+  it("renders All Projects button that navigates to all-projects view", () => {
     render(<ProjectSidebar {...defaultProps} />);
     const allProjectsButton = screen.getByRole("button", { name: "All Projects" });
     expect(allProjectsButton).toBeInTheDocument();
     fireEvent.click(allProjectsButton);
-    expect(mockPush).toHaveBeenCalledWith("/");
+    expect(mockPush).toHaveBeenCalledWith("/?project=all");
   });
 
   it("highlights All Projects button when no project is active", () => {

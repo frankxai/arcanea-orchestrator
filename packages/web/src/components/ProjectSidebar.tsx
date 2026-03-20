@@ -44,7 +44,7 @@ export function ProjectSidebar({
   };
 
   const handleAllProjects = () => {
-    router.push("/");
+    router.push("/?project=all");
   };
 
   const getOrchestrator = (projectId: string) =>

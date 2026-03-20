@@ -345,9 +345,9 @@ export function DirectTerminal({
     <div
       className={cn(
         "overflow-hidden rounded-[var(--radius-md)] border border-[var(--color-border-default)]",
-        `bg-[${TERMINAL_BACKGROUND}]`,
         fullscreen && "fixed inset-0 z-50 rounded-none border-0",
       )}
+      style={{ backgroundColor: TERMINAL_BACKGROUND }}
     >
       <TerminalChromeBar
         sessionId={sessionId}
