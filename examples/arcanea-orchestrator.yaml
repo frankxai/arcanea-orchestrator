@@ -1,0 +1,85 @@
+# Arcanea Orchestrator with Guardian Agent Assignments
+#
+# This configuration wraps agents with the Arcanea Intelligence OS,
+# routing tasks to Guardians from the Ten Gates based on task type
+# and file patterns.
+#
+# The Guardian plugin is a decorator: it wraps any inner agent
+# (claude-code, codex, aider) with Arcanea context injection.
+
+dataDir: ~/.agent-orchestrator
+worktreeDir: ~/.worktrees
+
+defaults:
+  runtime: tmux
+  agent: arcanea-guardian
+  workspace: worktree
+  notifiers: [desktop]
+
+projects:
+  arcanea-web:
+    name: Arcanea Web
+    repo: frankxai/arcanea
+    path: ~/Arcanea
+    defaultBranch: main
+    sessionPrefix: arcanea
+
+    # The Guardian plugin wraps claude-code by default.
+    # Tasks are auto-routed to Guardians based on keywords and file patterns.
+    agentConfig:
+      # Inner agent to wrap (claude-code | codex | aider | opencode)
+      innerAgent: claude-code
+      # Optional: force a specific Guardian for all tasks in this project
+      # defaultGuardian: Lyria
+      # Optional: disable Ten Gates table in prompts to save tokens
+      # includeGatesContext: false
+      permissions: auto-edit
+      model: claude-sonnet-4-20250514
+
+    tracker:
+      plugin: github
+
+    agentRules: |
+      Use TypeScript strict mode with Next.js App Router.
+      Follow the Arcanean Design System (Cinzel + Crimson Pro, cosmic theme).
+      Reference .arcanea/lore/CANON_LOCKED.md for any lore-touching changes.
+      Run `npm test` and `npm run lint` before pushing.
+
+  # Example: Dedicated project for lore/content work
+  # All tasks auto-route to Alera (Voice Guardian) due to content keywords
+  arcanea-lore:
+    name: Arcanea Library
+    repo: frankxai/arcanea
+    path: ~/Arcanea
+    defaultBranch: main
+    sessionPrefix: lore
+
+    agentConfig:
+      innerAgent: claude-code
+      # Force all tasks to Alera for documentation/content work
+      defaultGuardian: Alera
+      permissions: auto-edit
+
+    agentRules: |
+      You are writing for the Library of Arcanea.
+      Voice: Elevated but accessible, mythic but practical.
+      Always reference CANON_LOCKED.md for consistency.
+      Use the Five Elements system (Fire, Water, Earth, Wind, Void/Spirit).
+      Maintain the Lumina/Nero cosmic duality (Nero is NOT evil).
+
+# Guardian Routing Reference (auto-detected from task keywords and file patterns):
+#
+# | Guardian   | Gate        | Element   | Auto-Routes When...                        |
+# |------------|-------------|-----------|---------------------------------------------|
+# | Lyssandria | Foundation  | Earth     | database, migration, schema, infra, config  |
+# | Leyla      | Flow        | Water     | creativity, design, flow, animation, css    |
+# | Draconia   | Fire        | Fire      | test, transform, refactor, benchmark        |
+# | Maylinn    | Heart       | Heart     | ux, accessibility, empathy, user, a11y      |
+# | Alera      | Voice       | Voice     | docs, readme, content, writing, changelog   |
+# | Lyria      | Sight       | Sight     | ui, component, visual, design, layout       |
+# | Aiyami     | Crown       | Crown     | optimize, performance, architecture, cache  |
+# | Elara      | Starweave   | Starweave | debug, investigate, trace, fix, bug         |
+# | Ino        | Unity       | Unity     | integration, api, collab, swarm, webhook    |
+# | Shinkami   | Source      | Void      | orchestrate, meta, strategy, plan           |
+#
+# Override per-session with: ao spawn --agent arcanea-guardian --guardian Draconia
