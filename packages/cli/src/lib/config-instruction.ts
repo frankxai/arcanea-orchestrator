@@ -1,128 +1,112 @@
 /**
- * Returns the complete AO config schema as formatted text.
+ * Returns the Arcanea-ready AO config reference as formatted text.
  * Used by `ao config-help` and injected into orchestrator system prompts.
  */
 export function getConfigInstruction(): string {
   return `
-# Agent Orchestrator Config Reference
+# Arcanea Orchestrator Config Reference
 # File: agent-orchestrator.yaml
 
-# ── Top-level settings ──────────────────────────────────────────────
+# This config is designed for the Arcanea workspace on Windows.
+# It assumes the following local repos may already exist:
+# - C:/Users/frank/Arcanea
+# - C:/Users/frank/Arcanea/arcanea-code
+# - C:/Users/frank/Arcanea/oh-my-arcanea
+# - C:/Users/frank/Arcanea/claude-arcanea
+# - C:/Users/frank/Arcanea/arcanea-flow
+# - C:/Users/frank/Arcanea/arcanea-orchestrator
 
-port: 3000                    # Dashboard port (default: 3000, auto-finds free port if busy)
-terminalPort: 3001            # Terminal WebSocket port (default: 3001)
-directTerminalPort: 3003      # Direct terminal WebSocket port (default: 3003)
-readyThresholdMs: 300000      # Ms before "ready" session becomes "idle" (default: 5 min)
-
-# ── Default plugins ─────────────────────────────────────────────────
-# These apply to all projects unless overridden per-project.
+port: 3000
+terminalPort: 14800
+directTerminalPort: 14801
+readyThresholdMs: 300000
 
 defaults:
-  runtime: tmux               # tmux | process
-  agent: claude-code          # claude-code | aider | codex | opencode
-  workspace: worktree         # worktree | clone
-  notifiers:                  # List of active notifier plugins
-    - desktop                 # desktop | slack | webhook | composio | openclaw
+  runtime: tmux
+  agent: claude-code
+  workspace: worktree
+  notifiers:
+    - desktop
   orchestrator:
-    agent: claude-code        # Agent for orchestrator sessions (optional override)
+    agent: claude-code
   worker:
-    agent: claude-code        # Agent for worker sessions (optional override)
-
-# ── Projects ────────────────────────────────────────────────────────
-# Each key is a project ID (typically the repo directory name).
+    agent: codex
 
 projects:
-  my-app:
-    name: My App              # Display name
-    repo: owner/repo          # GitHub "owner/repo" format
-    path: ~/code/my-app       # Local path to the repo
-    defaultBranch: main       # main | master | next | develop
-    sessionPrefix: myapp      # Prefix for session names (e.g. myapp-1, myapp-2)
-
-    # ── Per-project plugin overrides (optional) ───────────────────
-    runtime: tmux             # Override default runtime
-    agent: claude-code        # Override default agent
-    workspace: worktree       # Override default workspace
-
-    # ── Agent configuration (optional) ────────────────────────────
-    agentConfig:
-      permissions: auto       # auto | manual — agent permission mode
-      model: claude-sonnet-4-20250514
-
-    # ── Agent rules (optional) ────────────────────────────────────
-    agentRules: |             # Inline rules passed to every agent prompt
-      Always run tests before committing.
-      Use conventional commits.
-    agentRulesFile: .ao-rules # Or point to a file (relative to project path)
-    orchestratorRules: |      # Rules for the orchestrator agent
-
-    # ── Orchestrator session strategy (optional) ──────────────────
-    # Controls what happens to the orchestrator session on restart.
-    orchestratorSessionStrategy: reuse
-    # Options: reuse | delete | ignore | delete-new | ignore-new | kill-previous
-
-    # ── Workspace setup (optional) ────────────────────────────────
-    symlinks:                 # Files/dirs to symlink into workspaces
-      - .env
-      - node_modules
-    postCreate:               # Commands to run after workspace creation
+  arcanea-platform:
+    name: Arcanea Platform
+    repo: frankxai/arcanea-ai-app
+    path: C:/Users/frank/Arcanea
+    defaultBranch: main
+    sessionPrefix: arcanea
+    workspace: worktree
+    agentRules: |
+      Keep Arcanea core changes isolated and keep the docs in sync with product behavior.
+    postCreate:
       - pnpm install
 
-    # ── Issue tracker (optional) ──────────────────────────────────
-    tracker:
-      plugin: github          # github | linear | gitlab
-      # Linear-specific:
-      # teamId: TEAM-123
-      # projectId: PROJECT-456
+  arcanea-code:
+    name: Arcanea Code
+    repo: frankxai/arcanea-code
+    path: C:/Users/frank/Arcanea/arcanea-code
+    defaultBranch: dev
+    sessionPrefix: code
+    agent: opencode
+    workspace: worktree
+    postCreate:
+      - bun install
 
-    # ── SCM configuration (optional, usually auto-detected) ───────
-    scm:
-      plugin: github          # github | gitlab
+  oh-my-arcanea:
+    name: Oh My Arcanea
+    repo: frankxai/oh-my-arcanea
+    path: C:/Users/frank/Arcanea/oh-my-arcanea
+    defaultBranch: dev
+    sessionPrefix: oma
+    agent: opencode
+    workspace: worktree
+    postCreate:
+      - bun install
 
-    # ── Task decomposition (optional) ─────────────────────────────
-    decomposer:
-      enabled: false          # Auto-decompose backlog issues
-      maxDepth: 3             # Max recursion depth
-      model: claude-sonnet-4-20250514
-      requireApproval: true   # Require human approval before executing
+  claude-arcanea:
+    name: Claude Arcanea
+    repo: frankxai/claude-arcanea
+    path: C:/Users/frank/Arcanea/claude-arcanea
+    defaultBranch: master
+    sessionPrefix: claude
+    agent: claude-code
+    workspace: worktree
+    postCreate:
+      - npm install
 
-    # ── Per-project reaction overrides (optional) ─────────────────
-    # reactions:
-    #   ci-failure:
-    #     enabled: true
+  arcanea-flow:
+    name: Arcanea Flow
+    repo: frankxai/arcanea-flow
+    path: C:/Users/frank/Arcanea/arcanea-flow
+    defaultBranch: main
+    sessionPrefix: flow
+    agent: codex
+    workspace: worktree
+    postCreate:
+      - npm install
 
-# ── Notification channels (optional) ────────────────────────────────
-
-notifiers:
-  desktop:
-    plugin: desktop
-  slack:
-    plugin: slack
-    # Requires SLACK_WEBHOOK_URL env var
-  webhook:
-    plugin: webhook
-    # url: https://example.com/hook
-
-# ── Notification routing (optional) ─────────────────────────────────
-# Route notifications by priority level.
+  arcanea-orchestrator:
+    name: Arcanea Orchestrator
+    repo: frankxai/arcanea-orchestrator
+    path: C:/Users/frank/Arcanea/arcanea-orchestrator
+    defaultBranch: main
+    sessionPrefix: ao
+    agent: codex
+    workspace: worktree
+    postCreate:
+      - pnpm install
 
 notificationRouting:
   critical:
     - desktop
-    - slack
   high:
     - desktop
   low:
     - desktop
 
-# ── Available plugins ───────────────────────────────────────────────
-#
-# Agent:     claude-code, aider, codex, opencode
-# Runtime:   tmux, process
-# Workspace: worktree, clone
-# SCM:       github, gitlab
-# Tracker:   github, linear, gitlab
-# Notifier:  desktop, slack, webhook, composio, openclaw
-# Terminal:  iterm2, web
 `.trim();
 }

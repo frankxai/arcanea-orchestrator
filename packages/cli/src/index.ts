@@ -20,7 +20,7 @@ const program = new Command();
 
 program
   .name("ao")
-  .description("Agent Orchestrator — manage parallel AI coding agents")
+  .description("Arcanea Orchestrator - coordinate Codex, Claude Code, OpenCode, and worktree-based agents")
   .version("0.1.0");
 
 registerInit(program);
@@ -41,7 +41,7 @@ registerUpdate(program);
 
 program
   .command("config-help")
-  .description("Show config schema and guide for creating agent-orchestrator.yaml")
+  .description("Show Arcanea config schema and guide for creating agent-orchestrator.yaml")
   .action(() => {
     console.log(getConfigInstruction());
   });
