@@ -654,7 +654,10 @@ function createClaudeCodeAgent(): Agent {
   return {
     name: "claude-code",
     processName: "claude",
-    promptDelivery: "post-launch",
+    // On Windows (process runtime, no PTY), we include the prompt in the
+    // launch command via --print -p, so delivery is "in-command".
+    // On macOS/Linux with tmux, prompt is sent post-launch via sendMessage.
+    promptDelivery: process.platform === "win32" ? "inline" : "post-launch",
 
     getLaunchCommand(config: AgentLaunchConfig): string {
       // Note: CLAUDECODE is unset via getEnvironment() (set to ""), not here.
@@ -679,9 +682,15 @@ function createClaudeCodeAgent(): Agent {
         parts.push("--append-system-prompt", shellEscape(config.systemPrompt));
       }
 
-      // NOTE: prompt is NOT included here — it's delivered post-launch via
-      // runtime.sendMessage() to keep Claude in interactive mode.
-      // Using -p causes one-shot mode (Claude exits after responding).
+      // On Windows / process runtime (no PTY/tmux available), we must use
+      // one-shot mode because there's no terminal to send messages to.
+      // Detect by checking platform — tmux is never available on win32.
+      const isHeadless = process.platform === "win32" || process.env.AO_HEADLESS === "1";
+      if (isHeadless && config.prompt) {
+        parts.push("--print", "-p", shellEscape(config.prompt));
+      }
+      // For tmux runtime (macOS/Linux): prompt is NOT included here —
+      // it's delivered post-launch via runtime.sendMessage().
 
       return parts.join(" ");
     },
