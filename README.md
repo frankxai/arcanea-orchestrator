@@ -43,6 +43,10 @@ This repo hosts two related pieces under one roof:
 - Not a TUI. Run **[`arcanea-code`](https://github.com/frankxai/arcanea-code)** (OpenCode fork) for a rich daily-driver surface that sits *on top of* this orchestrator.
 - Not the Arcanea product itself. This is the infrastructure layer; the product is at [arcanea.ai](https://arcanea.ai).
 
+## Living World Engine Alignment
+
+World work should be routed as repo-native tasks. Workers operate on isolated worktrees, run `@arcanea/world-sdk` commands (`arcanea-world create`, `ingest`, `remember`, `evolve`, `render --target book`, `validate`, `hash`, `index`, `claim`), and return PR-ready diffs against the world repo. The orchestrator should not centralize canon or merge the old `agent/claude/world-integration` branch wholesale; promotion work uses path-scoped branches such as `codex/world-engine-promotion`.
+
 ## Related
 
 - **[@arcanea/orchestrator](https://www.npmjs.com/package/@arcanea/orchestrator)** — the npm package (home: this repo)
