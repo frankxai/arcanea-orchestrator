@@ -38,6 +38,10 @@ This repo hosts two related pieces under one roof:
 └─────────────────────────────────────────────────────┘
 ```
 
+## Agent Stack Runtime Contract
+
+The Claude Agent SDK credit-pause signal makes AO's job sharper: every agent run needs a declared lane, budget, MCP health state, approval policy, worktree, and verification record. See [`docs/AGENT_STACK_RUNTIME_CONTRACT.md`](docs/AGENT_STACK_RUNTIME_CONTRACT.md) for the shared run shape that Arcanea Code, Claude Code, Codex, OpenCode, Gemini, Grok, Higgsfield/media agents, and future managed Arcanea workers should emit. The core package now exports `AgentRunRecord` and related budget/MCP/approval types for implementation work, `ao mcp health --json` exposes the capability board, and `ao run --dry-run` emits the first safe planned run record with MCP health attached.
+
 ## What this is NOT
 
 - Not a TUI. Run **[`arcanea-code`](https://github.com/frankxai/arcanea-code)** (OpenCode fork) for a rich daily-driver surface that sits *on top of* this orchestrator.

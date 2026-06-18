@@ -400,6 +400,140 @@ export interface CostEstimate {
 }
 
 // =============================================================================
+// ARCANEA AGENT RUN LEDGER
+// =============================================================================
+
+/** How an agent run is allowed to consume model/provider capacity. */
+export type AgentRunLane =
+  | "interactive-subscription"
+  | "byok-api"
+  | "managed-arcanea"
+  | "dry-run";
+
+/** Runtime family selected for an Arcanea-controlled run. */
+export type AgentRunRuntime =
+  | "claude-code"
+  | "claude-agent-sdk"
+  | "codex"
+  | "opencode"
+  | "gemini"
+  | "grok"
+  | "higgsfield"
+  | "arcanea-studio"
+  | "custom";
+
+/** Coarse lifecycle state for cross-runtime run records. */
+export type AgentRunStatus =
+  | "planned"
+  | "running"
+  | "needs-approval"
+  | "failed"
+  | "completed"
+  | "aborted";
+
+/** Confidence for budget/cost values when exact provider accounting is unavailable. */
+export type AgentRunCostConfidence = "exact" | "estimated" | "unknown";
+
+/** Risk flags surfaced in the MCP/tool capability board. */
+export type AgentRunToolRisk =
+  | "read-only"
+  | "write-capable"
+  | "destructive"
+  | "cost-bearing"
+  | "secret-bearing"
+  | "external-side-effect";
+
+/** Connector state for MCP servers and provider tools. */
+export type AgentRunConnectorState =
+  | "connected"
+  | "missing-auth"
+  | "expired"
+  | "unavailable"
+  | "disabled";
+
+/** Approval mode for classes of side effects. */
+export type AgentRunApprovalMode = "allow" | "allowed-in-worktree" | "ask" | "deny";
+
+/** Verification evidence emitted after a run. */
+export type AgentRunVerificationKind =
+  | "test"
+  | "typecheck"
+  | "build"
+  | "lint"
+  | "browser"
+  | "manual"
+  | "git-guard";
+
+export type AgentRunVerificationStatus = "passed" | "failed" | "skipped" | "blocked";
+
+/** Merge posture for review and Merge Room workflows. */
+export type AgentRunMergePosture =
+  | "none"
+  | "docs-only"
+  | "path-scoped-transplant"
+  | "ready-for-review"
+  | "needs-merge-room"
+  | "blocked";
+
+export interface AgentRunBudget {
+  maxUsd?: number | null;
+  maxMinutes: number;
+  maxToolCalls: number;
+  maxModelCalls?: number | null;
+  maxSubagents?: number | null;
+  costEstimateUsd?: number | null;
+  costEstimateConfidence?: AgentRunCostConfidence;
+}
+
+export interface AgentRunMcpConnector {
+  name: string;
+  state: AgentRunConnectorState;
+  risk: AgentRunToolRisk[];
+  lastSuccessfulCallAt?: string | null;
+  loginHint?: string | null;
+}
+
+export interface AgentRunApprovals {
+  filesystemWrites: AgentRunApprovalMode;
+  destructiveShell: AgentRunApprovalMode;
+  externalWrites: AgentRunApprovalMode;
+  paidGeneration: AgentRunApprovalMode;
+  secretTransmission?: AgentRunApprovalMode;
+}
+
+export interface AgentRunVerificationEvidence {
+  kind: AgentRunVerificationKind;
+  command: string;
+  status: AgentRunVerificationStatus;
+  summary?: string | null;
+  artifact?: string | null;
+}
+
+/**
+ * Canonical run ledger shape for Arcanea Code, AO JSON output, app cockpit
+ * timelines, and future managed Arcanea workers.
+ */
+export interface AgentRunRecord {
+  runId: `run_${string}`;
+  createdAt: string;
+  updatedAt?: string;
+  objective: string;
+  repo: string;
+  branch?: string | null;
+  worktree?: string | null;
+  runtime: AgentRunRuntime;
+  lane: AgentRunLane;
+  budget: AgentRunBudget;
+  mcp?: AgentRunMcpConnector[];
+  approvals: AgentRunApprovals;
+  status: AgentRunStatus;
+  verification?: AgentRunVerificationEvidence[];
+  filesTouched?: string[];
+  handoverPath?: string | null;
+  mergePosture?: AgentRunMergePosture | null;
+}
+
+// =============================================================================
 // WORKSPACE — Plugin Slot 3
 // =============================================================================
 

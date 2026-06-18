@@ -119,6 +119,20 @@ export type {
   ProjectObserver,
 } from "./observability.js";
 
+// Arcanea run ledger — shared contract for Arcanea Code, AO, and app cockpit timelines
+export {
+  createAgentRunId,
+  createAgentRunRecord,
+  defaultAgentRunApprovals,
+  defaultAgentRunBudget,
+  validateAgentRunRecord,
+} from "./agent-run-record.js";
+export type { CreateAgentRunRecordInput } from "./agent-run-record.js";
+
+// MCP/provider health — capability board state for run records and Arcanea Code
+export { DEFAULT_MCP_TOOL_DEFINITIONS, detectMcpHealth } from "./mcp-health.js";
+export type { McpToolDefinition } from "./mcp-health.js";
+
 // Feedback tools — contracts, validation, and report storage
 export {
   FEEDBACK_TOOL_NAMES,
